@@ -6,7 +6,7 @@ Falls back to rule-based scoring if no API key is configured.
 
 import json
 from typing import Any, Dict, List
-from agents.base import BaseAgent
+from agents.base import BaseAgent, extract_claude_text
 from config import get_settings
 
 
@@ -91,7 +91,7 @@ Return ONLY the JSON array, no other text."""
 
         try:
             response = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-sonnet-5",
                 max_tokens=1500,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -100,7 +100,7 @@ Return ONLY the JSON array, no other text."""
             return self._rule_based_sentiment(articles)
 
         try:
-            scores_raw = json.loads(response.content[0].text)
+            scores_raw = json.loads(extract_claude_text(response))
             result = []
             for score in scores_raw:
                 idx = score["index"] - 1
@@ -115,7 +115,7 @@ Return ONLY the JSON array, no other text."""
                         "relevance": articles[idx]["relevance"],
                     })
             return result
-        except (json.JSONDecodeError, KeyError, IndexError) as e:
+        except (json.JSONDecodeError, KeyError, IndexError, ValueError) as e:
             self.log(f"Claude response parse error: {e}, falling back to rules")
             return self._rule_based_sentiment(articles)
 

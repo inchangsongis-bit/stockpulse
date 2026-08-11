@@ -42,6 +42,29 @@ const PIPELINE_RESULT = {
   research: { articles: [] },
 };
 
+const PIPELINE_RESULT_WITH_NEWS = {
+  ...PIPELINE_RESULT,
+  sentiment_profile: {
+    composite_sentiment: 0.3,
+    sentiment_trend: "improving",
+    article_scores: [
+      { title: "Fed Signals Rate Cut", source: "Reuters", sentiment: 0.7, expected_impact: "high" },
+    ],
+  },
+  research: {
+    articles: [
+      {
+        title: "Fed Signals Rate Cut",
+        source: "Reuters",
+        url: "https://reuters.com/mock/fed-rate-cut",
+        summary: "The Fed hinted at a rate cut.",
+        category: "macro",
+        relevance: 0.9,
+      },
+    ],
+  },
+};
+
 function mockFetchSequence(handlers: Record<string, () => Promise<Response>>) {
   global.fetch = jest.fn((url: string) => {
     const match = Object.keys(handlers).find((key) => url.includes(key));
@@ -92,6 +115,28 @@ describe("Dashboard", () => {
 
     expect(await screen.findByText("BUY")).toBeInTheDocument();
     expect(screen.getByText(/Strong uptrend with confirming volume/i)).toBeInTheDocument();
+  });
+
+  it("links each news article to its source URL", async () => {
+    mockFetchSequence({
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/pipeline/run/SPY": () => jsonResponse(PIPELINE_RESULT_WITH_NEWS),
+    });
+
+    const user = userEvent.setup();
+    render(<Dashboard />);
+
+    await screen.findByText("$345.11");
+    await user.click(screen.getByRole("button", { name: /run analysis pipeline/i }));
+    await screen.findByText("BUY");
+
+    await user.click(screen.getByRole("button", { name: /news & sentiment/i }));
+
+    const link = await screen.findByRole("link", { name: /fed signals rate cut/i });
+    expect(link).toHaveAttribute("href", "https://reuters.com/mock/fed-rate-cut");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));
   });
 
   it("shows a status-coded error when the pipeline responds with a server error", async () => {

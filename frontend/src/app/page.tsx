@@ -69,6 +69,7 @@ interface PipelineResult {
     articles: Array<{
       title: string;
       source: string;
+      url: string;
       summary: string;
       category: string;
       relevance: number;
@@ -586,7 +587,18 @@ function NewsPanel({
                     </span>
                   )}
                 </div>
-                <p className="text-sm font-medium mb-1">{a.title}</p>
+                {a.url ? (
+                  <a
+                    href={a.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm font-medium mb-1 block hover:text-[var(--blue)] hover:underline"
+                  >
+                    {a.title}
+                  </a>
+                ) : (
+                  <p className="text-sm font-medium mb-1">{a.title}</p>
+                )}
                 <p className="text-xs text-[var(--text-muted)] line-clamp-2">{a.summary}</p>
               </div>
             </div>

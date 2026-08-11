@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, delete
 from datetime import datetime, timedelta
 from typing import Optional
 from database import get_db
 from models import OHLCV
+from data_sources.polygon import fetch_daily_ohlcv, PolygonError
 
 router = APIRouter(prefix="/api/stocks", tags=["stocks"])
 
@@ -39,6 +40,38 @@ async def get_ohlcv(
             }
             for r in rows
         ],
+    }
+
+
+@router.post("/{ticker}/sync")
+async def sync_ohlcv(
+    ticker: str,
+    days: int = Query(default=730, ge=1, le=1825),
+    db: AsyncSession = Depends(get_db),
+):
+    """Replace stored OHLCV history for a ticker with real data from Polygon."""
+    ticker = ticker.upper()
+    try:
+        bars = await fetch_daily_ohlcv(ticker, days=days)
+    except PolygonError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if not bars:
+        raise HTTPException(status_code=502, detail=f"Polygon returned no data for {ticker}")
+
+    await db.execute(delete(OHLCV).where(OHLCV.ticker == ticker))
+    for bar in bars:
+        db.add(OHLCV(**bar))
+    await db.commit()
+
+    return {
+        "ticker": ticker,
+        "synced_bars": len(bars),
+        "range": {
+            "start": bars[0]["timestamp"].isoformat(),
+            "end": bars[-1]["timestamp"].isoformat(),
+        },
+        "latest_close": bars[-1]["close"],
     }
 
 

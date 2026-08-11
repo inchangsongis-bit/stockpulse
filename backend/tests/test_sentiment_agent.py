@@ -90,7 +90,7 @@ async def test_claude_sentiment_falls_back_to_rules_on_malformed_response(monkey
     )
 
     fake_response = MagicMock()
-    fake_response.content = [MagicMock(text="not valid json")]
+    fake_response.content = [MagicMock(type="text", text="not valid json")]
     fake_client = MagicMock()
     fake_client.messages.create.return_value = fake_response
     monkeypatch.setattr("anthropic.Anthropic", lambda api_key: fake_client)
@@ -99,3 +99,37 @@ async def test_claude_sentiment_falls_back_to_rules_on_malformed_response(monkey
     profile = await agent.run("SPY", {"research": {"articles": ARTICLES, "date": "2024-01-01"}})
 
     assert len(profile["article_scores"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_claude_sentiment_skips_thinking_block_and_strips_markdown_fence(monkeypatch):
+    """Regression test: models with extended thinking put a non-text
+    'thinking' block at content[0], and often wrap JSON replies in a
+    ```json fence even when told not to. Both must be handled."""
+    monkeypatch.setattr(
+        "agents.sentiment_analyst.get_settings",
+        lambda: FakeSettings(anthropic_api_key="sk-ant-valid"),
+    )
+
+    json_reply = (
+        '```json\n'
+        '[{"index": 1, "sentiment": 0.6, "source_credibility": 0.9, '
+        '"expected_impact": "high", "reasoning": "Beat estimates"},'
+        '{"index": 2, "sentiment": -0.4, "source_credibility": 0.8, '
+        '"expected_impact": "medium", "reasoning": "Slowdown risk"}]\n'
+        '```'
+    )
+    thinking_block = MagicMock(type="thinking", text=None)
+    text_block = MagicMock(type="text", text=json_reply)
+    fake_response = MagicMock()
+    fake_response.content = [thinking_block, text_block]
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = fake_response
+    monkeypatch.setattr("anthropic.Anthropic", lambda api_key: fake_client)
+
+    agent = SentimentAnalystAgent()
+    profile = await agent.run("SPY", {"research": {"articles": ARTICLES, "date": "2024-01-01"}})
+
+    scores = {s["title"]: s["sentiment"] for s in profile["article_scores"]}
+    assert scores["Company beats earnings expectations"] == 0.6
+    assert scores["Analysts warn of slowdown risk"] == -0.4
