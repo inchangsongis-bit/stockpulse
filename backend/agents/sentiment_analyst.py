@@ -87,11 +87,17 @@ Articles:
 
 Return ONLY the JSON array, no other text."""
 
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        import anthropic as anthropic_module
+
+        try:
+            response = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=1500,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except anthropic_module.APIError as e:
+            self.log(f"Claude API error: {e}, falling back to rules")
+            return self._rule_based_sentiment(articles)
 
         try:
             scores_raw = json.loads(response.content[0].text)
