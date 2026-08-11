@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from database import get_db
 from models import OHLCV
-from data_sources.polygon import fetch_daily_ohlcv, PolygonError
+from data_sources.polygon import fetch_ohlcv, PolygonError
 
 router = APIRouter(prefix="/api/stocks", tags=["stocks"])
 
@@ -21,12 +21,17 @@ async def get_ohlcv(
     since = datetime.now() - timedelta(days=days)
     result = await db.execute(
         select(OHLCV)
-        .where(OHLCV.ticker == ticker.upper(), OHLCV.timestamp >= since)
+        .where(
+            OHLCV.ticker == ticker.upper(),
+            OHLCV.interval == interval,
+            OHLCV.timestamp >= since,
+        )
         .order_by(OHLCV.timestamp.asc())
     )
     rows = result.scalars().all()
     return {
         "ticker": ticker.upper(),
+        "interval": interval,
         "count": len(rows),
         "data": [
             {
@@ -43,29 +48,48 @@ async def get_ohlcv(
     }
 
 
+# Minute-level history gets large fast (Polygon caps a single request at
+# 50,000 bars — a few weeks of 1-min SPY bars), so it gets a much smaller
+# default/max window than daily bars.
+_SYNC_LIMITS = {
+    "daily": {"default_days": 730, "max_days": 1825},
+    "minute": {"default_days": 5, "max_days": 30},
+}
+
+
 @router.post("/{ticker}/sync")
 async def sync_ohlcv(
     ticker: str,
-    days: int = Query(default=730, ge=1, le=1825),
+    interval: str = Query(default="daily", regex="^(daily|minute)$"),
+    days: Optional[int] = Query(default=None, ge=1),
     db: AsyncSession = Depends(get_db),
 ):
     """Replace stored OHLCV history for a ticker with real data from Polygon."""
     ticker = ticker.upper()
+    limits = _SYNC_LIMITS[interval]
+    days = days if days is not None else limits["default_days"]
+    if days > limits["max_days"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"days must be <= {limits['max_days']} for interval={interval}",
+        )
+
     try:
-        bars = await fetch_daily_ohlcv(ticker, days=days)
+        bars = await fetch_ohlcv(ticker, interval=interval, days=days)
     except PolygonError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
     if not bars:
         raise HTTPException(status_code=502, detail=f"Polygon returned no data for {ticker}")
 
-    await db.execute(delete(OHLCV).where(OHLCV.ticker == ticker))
+    await db.execute(delete(OHLCV).where(OHLCV.ticker == ticker, OHLCV.interval == interval))
     for bar in bars:
         db.add(OHLCV(**bar))
     await db.commit()
 
     return {
         "ticker": ticker,
+        "interval": interval,
         "synced_bars": len(bars),
         "range": {
             "start": bars[0]["timestamp"].isoformat(),
@@ -77,7 +101,7 @@ async def sync_ohlcv(
 
 @router.get("/{ticker}/latest")
 async def get_latest(ticker: str, db: AsyncSession = Depends(get_db)):
-    """Get the most recent OHLCV bar."""
+    """Get the most recent OHLCV bar, whichever interval it came from."""
     result = await db.execute(
         select(OHLCV)
         .where(OHLCV.ticker == ticker.upper())
@@ -89,6 +113,7 @@ async def get_latest(ticker: str, db: AsyncSession = Depends(get_db)):
         return {"error": "No data found"}
     return {
         "ticker": row.ticker,
+        "interval": row.interval,
         "timestamp": row.timestamp.isoformat(),
         "open": row.open,
         "high": row.high,

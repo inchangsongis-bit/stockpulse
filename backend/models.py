@@ -8,6 +8,7 @@ class OHLCV(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     ticker = Column(String(10), nullable=False, index=True)
+    interval = Column(String(10), nullable=False, default="daily", server_default="daily", index=True)
     timestamp = Column(DateTime, nullable=False, index=True)
     open = Column(Float, nullable=False)
     high = Column(Float, nullable=False)
