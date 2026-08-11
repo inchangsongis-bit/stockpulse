@@ -59,7 +59,12 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     avg_loss = loss.ewm(alpha=1 / period, min_periods=period).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    result = 100 - (100 / (1 + rs))
+    # No losses in the window (all gains) is maximally overbought, not undefined.
+    result = result.where(avg_loss != 0, 100.0)
+    # No gains and no losses (flat price) is neutral, not undefined.
+    result = result.where(~((avg_gain == 0) & (avg_loss == 0)), 50.0)
+    return result
 
 
 def stochastic(df: pd.DataFrame, k_period: int = 14, d_period: int = 3):

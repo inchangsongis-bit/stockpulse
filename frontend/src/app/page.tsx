@@ -109,6 +109,10 @@ export default function Dashboard() {
     setError(null);
     try {
       const res = await fetch(`${API}/api/pipeline/run/${ticker}`, { method: "POST" });
+      if (!res.ok) {
+        setError(`Pipeline failed (${res.status}). Check the backend logs for details.`);
+        return;
+      }
       const data = await res.json();
       if (data.error) {
         setError(data.error);

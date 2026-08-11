@@ -163,11 +163,23 @@ class StrategyEngineAgent(BaseAgent):
         settings = get_settings()
 
         if settings.anthropic_api_key:
-            return await self._claude_reasoning(
-                ticker, action, confidence, technical, sentiment, conflict_note
-            )
+            try:
+                return await self._claude_reasoning(
+                    ticker, action, confidence, technical, sentiment, conflict_note
+                )
+            except Exception as e:
+                import anthropic
 
-        # Template-based fallback
+                if isinstance(e, anthropic.APIError):
+                    self.log(f"Claude API error: {e}, falling back to template reasoning")
+                else:
+                    raise
+
+        return self._template_reasoning(ticker, action, confidence, technical, sentiment, conflict_note)
+
+    def _template_reasoning(
+        self, ticker, action, confidence, technical, sentiment, conflict_note
+    ) -> str:
         indicators = technical.get("indicators", {})
         parts = [f"Signal: {action} with {confidence}% confidence for {ticker}."]
 
