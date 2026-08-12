@@ -20,11 +20,22 @@ def _add_missing_columns(sync_conn):
     from sqlalchemy import inspect, text
 
     inspector = inspect(sync_conn)
-    if "ohlcv" not in inspector.get_table_names():
-        return
-    existing = {c["name"] for c in inspector.get_columns("ohlcv")}
-    if "interval" not in existing:
-        sync_conn.execute(text("ALTER TABLE ohlcv ADD COLUMN interval VARCHAR(10) NOT NULL DEFAULT 'daily'"))
+    migrations = [
+        ("ohlcv", "interval", "ALTER TABLE ohlcv ADD COLUMN interval VARCHAR(10) NOT NULL DEFAULT 'daily'"),
+        ("news_articles", "external_id", "ALTER TABLE news_articles ADD COLUMN external_id INTEGER"),
+        ("news_articles", "sentiment", "ALTER TABLE news_articles ADD COLUMN sentiment FLOAT"),
+        ("news_articles", "source_credibility", "ALTER TABLE news_articles ADD COLUMN source_credibility FLOAT"),
+        ("news_articles", "expected_impact", "ALTER TABLE news_articles ADD COLUMN expected_impact VARCHAR(10)"),
+        ("news_articles", "reasoning", "ALTER TABLE news_articles ADD COLUMN reasoning TEXT"),
+        ("news_articles", "sentiment_scored_at", "ALTER TABLE news_articles ADD COLUMN sentiment_scored_at DATETIME"),
+    ]
+    table_names = inspector.get_table_names()
+    for table, column, ddl in migrations:
+        if table not in table_names:
+            continue
+        existing = {c["name"] for c in inspector.get_columns(table)}
+        if column not in existing:
+            sync_conn.execute(text(ddl))
 
 
 async def init_db():

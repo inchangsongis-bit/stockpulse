@@ -4,7 +4,7 @@ from sqlalchemy import select, desc, delete
 from datetime import datetime, timedelta
 from typing import Optional
 from database import get_db
-from models import OHLCV
+from models import OHLCV, NewsArticle
 from data_sources.polygon import fetch_ohlcv, PolygonError
 
 router = APIRouter(prefix="/api/stocks", tags=["stocks"])
@@ -96,6 +96,42 @@ async def sync_ohlcv(
             "end": bars[-1]["timestamp"].isoformat(),
         },
         "latest_close": bars[-1]["close"],
+    }
+
+
+@router.get("/{ticker}/news")
+async def get_news(
+    ticker: str,
+    days: int = Query(default=30, ge=1, le=365),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get persisted news articles + cached sentiment for a ticker."""
+    since = datetime.now() - timedelta(days=days)
+    result = await db.execute(
+        select(NewsArticle)
+        .where(NewsArticle.ticker == ticker.upper(), NewsArticle.published_at >= since)
+        .order_by(desc(NewsArticle.published_at))
+    )
+    rows = result.scalars().all()
+    return {
+        "ticker": ticker.upper(),
+        "count": len(rows),
+        "articles": [
+            {
+                "title": r.title,
+                "source": r.source,
+                "url": r.url,
+                "summary": r.summary,
+                "category": r.category,
+                "published_at": r.published_at.isoformat() if r.published_at else None,
+                "relevance": r.relevance,
+                "sentiment": r.sentiment,
+                "source_credibility": r.source_credibility,
+                "expected_impact": r.expected_impact,
+                "reasoning": r.reasoning,
+            }
+            for r in rows
+        ],
     }
 
 

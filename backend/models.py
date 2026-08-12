@@ -40,6 +40,12 @@ class NewsArticle(Base):
     published_at = Column(DateTime)
     relevance = Column(Float)
     fetched_at = Column(DateTime, server_default=func.now())
+    external_id = Column(Integer)  # source's own article id (e.g. Finnhub); aux lookup only, not the dedup key
+    sentiment = Column(Float)
+    source_credibility = Column(Float)
+    expected_impact = Column(String(10))
+    reasoning = Column(Text)
+    sentiment_scored_at = Column(DateTime)
 
 
 class TechnicalProfile(Base):

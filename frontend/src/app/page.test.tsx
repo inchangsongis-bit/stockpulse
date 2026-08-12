@@ -70,7 +70,16 @@ const PIPELINE_RESULT_WITH_NEWS = {
     composite_sentiment: 0.3,
     sentiment_trend: "improving",
     article_scores: [
-      { title: "Fed Signals Rate Cut", source: "Reuters", sentiment: 0.7, expected_impact: "high" },
+      {
+        // Deliberately different title text from the article below (real
+        // Finnhub titles can drift slightly from what was originally
+        // fetched) — the join must go through `url`, not `title`.
+        title: "Fed Signals Rate Cut (updated headline)",
+        source: "Reuters",
+        url: "https://reuters.com/mock/fed-rate-cut",
+        sentiment: 0.7,
+        expected_impact: "high",
+      },
     ],
   },
   research: {
@@ -161,6 +170,10 @@ describe("Dashboard", () => {
     expect(link).toHaveAttribute("href", "https://reuters.com/mock/fed-rate-cut");
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));
+
+    // The sentiment score's title deliberately differs from the article's
+    // own title above — this only renders if the join matched on `url`.
+    expect(screen.getByText("+0.7")).toBeInTheDocument();
   });
 
   it("shows a status-coded error when the pipeline responds with a server error", async () => {

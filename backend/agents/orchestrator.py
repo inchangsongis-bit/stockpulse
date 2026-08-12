@@ -25,6 +25,7 @@ class PipelineOrchestrator:
         ticker: str,
         ohlcv_data: List[Dict[str, Any]],
         use_mock: bool = True,
+        cached_sentiment: Optional[Dict[str, dict]] = None,
     ) -> Dict[str, Any]:
         """
         Run the full analysis pipeline for a single ticker.
@@ -50,7 +51,7 @@ class PipelineOrchestrator:
         # Step 3: Sentiment Analyst (needs research output)
         print("\n── Step 3/4: Sentiment Analysis ──")
         sentiment_profile = await self.sentiment_analyst.run(
-            ticker, {"research": research}
+            ticker, {"research": research, "cached_sentiment": cached_sentiment or {}}
         )
         results["sentiment_profile"] = sentiment_profile
 
