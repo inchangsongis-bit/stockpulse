@@ -63,3 +63,21 @@ async def test_run_pipeline_without_ohlcv_data_returns_error(client):
     assert resp.status_code == 200
     body = resp.json()
     assert "error" in body
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_ignores_minute_bars(client, session_factory):
+    """Indicators assume one bar per day; minute bars for a ticker with no
+    daily history must not be picked up as a substitute."""
+    async with session_factory() as session:
+        session.add(OHLCV(
+            ticker="MINUTEONLY",
+            interval="minute",
+            timestamp=datetime.now(),
+            open=100, high=101, low=99, close=100.5, volume=1000,
+        ))
+        await session.commit()
+
+    resp = await client.post("/api/pipeline/run/MINUTEONLY")
+    assert resp.status_code == 200
+    assert "error" in resp.json()

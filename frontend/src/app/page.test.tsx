@@ -2,6 +2,28 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Dashboard from "./page";
 
+// lightweight-charts renders onto a real <canvas> 2D context, which jsdom
+// doesn't implement. We're testing that our own code drives the library's
+// API correctly, not the library's rendering internals, so stub it out.
+jest.mock("lightweight-charts", () => {
+  const fakeSeries = () => ({
+    setData: jest.fn(),
+    priceScale: jest.fn(() => ({ applyOptions: jest.fn() })),
+  });
+  const fakeChart = {
+    addCandlestickSeries: jest.fn(fakeSeries),
+    addHistogramSeries: jest.fn(fakeSeries),
+    subscribeCrosshairMove: jest.fn(),
+    applyOptions: jest.fn(),
+    timeScale: jest.fn(() => ({ fitContent: jest.fn() })),
+    remove: jest.fn(),
+  };
+  return {
+    createChart: jest.fn(() => fakeChart),
+    CrosshairMode: { Normal: 0 },
+  };
+});
+
 function makeBar(close: number, daysAgo: number) {
   const ts = new Date(Date.now() - daysAgo * 86400000).toISOString();
   return { timestamp: ts, open: close, high: close * 1.01, low: close * 0.99, close, volume: 1000 };
@@ -42,6 +64,29 @@ const PIPELINE_RESULT = {
   research: { articles: [] },
 };
 
+const PIPELINE_RESULT_WITH_NEWS = {
+  ...PIPELINE_RESULT,
+  sentiment_profile: {
+    composite_sentiment: 0.3,
+    sentiment_trend: "improving",
+    article_scores: [
+      { title: "Fed Signals Rate Cut", source: "Reuters", sentiment: 0.7, expected_impact: "high" },
+    ],
+  },
+  research: {
+    articles: [
+      {
+        title: "Fed Signals Rate Cut",
+        source: "Reuters",
+        url: "https://reuters.com/mock/fed-rate-cut",
+        summary: "The Fed hinted at a rate cut.",
+        category: "macro",
+        relevance: 0.9,
+      },
+    ],
+  },
+};
+
 function mockFetchSequence(handlers: Record<string, () => Promise<Response>>) {
   global.fetch = jest.fn((url: string) => {
     const match = Object.keys(handlers).find((key) => url.includes(key));
@@ -62,7 +107,9 @@ function jsonResponse(body: unknown, status = 200) {
 
 describe("Dashboard", () => {
   afterEach(() => {
-    jest.resetAllMocks();
+    // clearAllMocks (not resetAllMocks) — resetting would also wipe the
+    // lightweight-charts mock's implementation set up in jest.mock() above.
+    jest.clearAllMocks();
   });
 
   it("loads OHLCV data and renders the latest price", async () => {
@@ -92,6 +139,28 @@ describe("Dashboard", () => {
 
     expect(await screen.findByText("BUY")).toBeInTheDocument();
     expect(screen.getByText(/Strong uptrend with confirming volume/i)).toBeInTheDocument();
+  });
+
+  it("links each news article to its source URL", async () => {
+    mockFetchSequence({
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/pipeline/run/SPY": () => jsonResponse(PIPELINE_RESULT_WITH_NEWS),
+    });
+
+    const user = userEvent.setup();
+    render(<Dashboard />);
+
+    await screen.findByText("$345.11");
+    await user.click(screen.getByRole("button", { name: /run analysis pipeline/i }));
+    await screen.findByText("BUY");
+
+    await user.click(screen.getByRole("button", { name: /news & sentiment/i }));
+
+    const link = await screen.findByRole("link", { name: /fed signals rate cut/i });
+    expect(link).toHaveAttribute("href", "https://reuters.com/mock/fed-rate-cut");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));
   });
 
   it("shows a status-coded error when the pipeline responds with a server error", async () => {

@@ -19,10 +19,11 @@ async def run_pipeline(ticker: str, db: AsyncSession = Depends(get_db)):
     """Run the full analysis pipeline for a ticker."""
     ticker = ticker.upper()
 
-    # Fetch OHLCV data from DB
+    # Fetch daily OHLCV data from DB — indicators (SMA/RSI/etc.) assume
+    # one bar per day, so minute bars must be excluded here.
     result = await db.execute(
         select(OHLCV)
-        .where(OHLCV.ticker == ticker)
+        .where(OHLCV.ticker == ticker, OHLCV.interval == "daily")
         .order_by(OHLCV.timestamp.asc())
     )
     rows = result.scalars().all()

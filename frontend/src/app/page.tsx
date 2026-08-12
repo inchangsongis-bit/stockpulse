@@ -1,6 +1,13 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  createChart,
+  CrosshairMode,
+  type IChartApi,
+  type ISeriesApi,
+  type UTCTimestamp,
+} from "lightweight-charts";
 
 const API = "http://localhost:8000";
 
@@ -69,6 +76,7 @@ interface PipelineResult {
     articles: Array<{
       title: string;
       source: string;
+      url: string;
       summary: string;
       category: string;
       relevance: number;
@@ -183,7 +191,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Chart — spans 2 cols */}
         <div className="lg:col-span-2">
-          <PriceChart data={ohlcv} />
+          <PriceChartPanel ticker={ticker} />
         </div>
 
         {/* Signal Card */}
@@ -275,98 +283,312 @@ export default function Dashboard() {
 
 // ── Components ──
 
-function PriceChart({ data }: { data: OHLCVBar[] }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+type ChartInterval = "daily" | "minute";
+
+interface RangeOption {
+  label: string;
+  days: number;
+}
+
+const DAILY_RANGES: RangeOption[] = [
+  { label: "1M", days: 30 },
+  { label: "3M", days: 90 },
+  { label: "6M", days: 180 },
+  { label: "1Y", days: 365 },
+  { label: "2Y", days: 730 },
+];
+
+const MINUTE_RANGES: RangeOption[] = [
+  { label: "1D", days: 1 },
+  { label: "3D", days: 3 },
+  { label: "5D", days: 5 },
+];
+
+function toUnixSeconds(iso: string): UTCTimestamp {
+  return Math.floor(new Date(iso).getTime() / 1000) as UTCTimestamp;
+}
+
+function PriceChartPanel({ ticker }: { ticker: string }) {
+  const [interval, setInterval_] = useState<ChartInterval>("daily");
+  const [days, setDays] = useState(365);
+  const [bars, setBars] = useState<OHLCVBar[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+  const [hover, setHover] = useState<OHLCVBar | null>(null);
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const barsRef = useRef<OHLCVBar[]>([]);
+
+  const ranges = interval === "daily" ? DAILY_RANGES : MINUTE_RANGES;
+
+  // Reset to a sensible default range when the interval changes
+  useEffect(() => {
+    setDays(interval === "daily" ? 365 : 3);
+  }, [interval]);
+
+  const loadBars = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
+    fetch(`${API}/api/stocks/${ticker}/ohlcv?days=${days}&interval=${interval}`)
+      .then((r) => r.json())
+      .then((d) => setBars(d.data || []))
+      .catch(() => setLoadError("Failed to load chart data."))
+      .finally(() => setLoading(false));
+  }, [ticker, days, interval]);
 
   useEffect(() => {
-    if (!canvasRef.current || data.length === 0) return;
+    loadBars();
+  }, [loadBars]);
 
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+  // Create the chart once on mount
+  useEffect(() => {
+    if (!containerRef.current) return;
 
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
+    const chart = createChart(containerRef.current, {
+      autoSize: true,
+      layout: { background: { color: "transparent" }, textColor: "#8888a0", fontSize: 11 },
+      grid: {
+        vertLines: { color: "#1a1a2e" },
+        horzLines: { color: "#1a1a2e" },
+      },
+      crosshair: { mode: CrosshairMode.Normal },
+      rightPriceScale: { borderColor: "#1a1a2e" },
+      timeScale: { borderColor: "#1a1a2e" },
+    });
 
-    const w = rect.width;
-    const h = rect.height;
-    const padding = { top: 20, right: 60, bottom: 30, left: 10 };
-    const chartW = w - padding.left - padding.right;
-    const chartH = h - padding.top - padding.bottom;
+    const candleSeries = chart.addCandlestickSeries({
+      upColor: "#22c55e",
+      downColor: "#ef4444",
+      borderUpColor: "#22c55e",
+      borderDownColor: "#ef4444",
+      wickUpColor: "#22c55e",
+      wickDownColor: "#ef4444",
+    });
 
-    // Use last 120 bars for visibility
-    const visible = data.slice(-120);
-    const closes = visible.map((d) => d.close);
-    const minP = Math.min(...visible.map((d) => d.low)) * 0.998;
-    const maxP = Math.max(...visible.map((d) => d.high)) * 1.002;
+    // Overlay histogram on its own (invisible) price scale so it shares
+    // the chart without competing with the candlestick price axis.
+    const volumeSeries = chart.addHistogramSeries({
+      priceFormat: { type: "volume" },
+      priceScaleId: "",
+    });
+    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
 
-    const xScale = (i: number) => padding.left + (i / (visible.length - 1)) * chartW;
-    const yScale = (p: number) => padding.top + (1 - (p - minP) / (maxP - minP)) * chartH;
+    chart.subscribeCrosshairMove((param) => {
+      const candle = param.seriesData.get(candleSeries) as
+        | { time: UTCTimestamp; open: number; high: number; low: number; close: number }
+        | undefined;
+      if (!param.time || !candle) {
+        // Cursor left the chart — fall back to showing the latest bar.
+        const latest = barsRef.current;
+        setHover(latest.length > 0 ? latest[latest.length - 1] : null);
+        return;
+      }
+      const vol = param.seriesData.get(volumeSeries) as { value: number } | undefined;
+      setHover({
+        timestamp: new Date((candle.time as number) * 1000).toISOString(),
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        volume: vol?.value ?? 0,
+      });
+    });
 
-    // Clear
-    ctx.fillStyle = "#12121a";
-    ctx.fillRect(0, 0, w, h);
+    chartRef.current = chart;
+    candleSeriesRef.current = candleSeries;
+    volumeSeriesRef.current = volumeSeries;
 
-    // Grid lines
-    ctx.strokeStyle = "#1a1a2e";
-    ctx.lineWidth = 0.5;
-    const gridSteps = 5;
-    for (let i = 0; i <= gridSteps; i++) {
-      const y = padding.top + (i / gridSteps) * chartH;
-      ctx.beginPath();
-      ctx.moveTo(padding.left, y);
-      ctx.lineTo(w - padding.right, y);
-      ctx.stroke();
+    return () => {
+      chart.remove();
+      chartRef.current = null;
+      candleSeriesRef.current = null;
+      volumeSeriesRef.current = null;
+    };
+  }, []);
 
-      // Price labels
-      const price = maxP - (i / gridSteps) * (maxP - minP);
-      ctx.fillStyle = "#8888a0";
-      ctx.font = "11px system-ui";
-      ctx.textAlign = "left";
-      ctx.fillText(`$${price.toFixed(0)}`, w - padding.right + 5, y + 4);
+  // Push fresh data into the chart whenever bars/interval change
+  useEffect(() => {
+    barsRef.current = bars;
+    if (!candleSeriesRef.current || !volumeSeriesRef.current || !chartRef.current) return;
+
+    candleSeriesRef.current.setData(
+      bars.map((b) => ({
+        time: toUnixSeconds(b.timestamp),
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
+      }))
+    );
+    volumeSeriesRef.current.setData(
+      bars.map((b) => ({
+        time: toUnixSeconds(b.timestamp),
+        value: b.volume,
+        color: b.close >= b.open ? "rgba(34,197,94,0.4)" : "rgba(239,68,68,0.4)",
+      }))
+    );
+    chartRef.current.applyOptions({
+      timeScale: { timeVisible: interval === "minute", secondsVisible: false },
+    });
+    chartRef.current.timeScale().fitContent();
+
+    setHover(bars.length > 0 ? bars[bars.length - 1] : null);
+  }, [bars, interval]);
+
+  const handleSync = async () => {
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      const res = await fetch(
+        `${API}/api/stocks/${ticker}/sync?interval=${interval}&days=${days}`,
+        { method: "POST" }
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setSyncMsg(data.detail || `Sync failed (${res.status}).`);
+      } else {
+        setSyncMsg(`Synced ${data.synced_bars} bars — latest close $${data.latest_close.toFixed(2)}`);
+        loadBars();
+      }
+    } catch {
+      setSyncMsg("Sync failed — is the backend running?");
+    } finally {
+      setSyncing(false);
     }
+  };
 
-    // Candlesticks
-    const barWidth = Math.max(1, chartW / visible.length * 0.6);
-    visible.forEach((bar, i) => {
-      const x = xScale(i);
-      const isGreen = bar.close >= bar.open;
-      ctx.fillStyle = isGreen ? "#22c55e" : "#ef4444";
-      ctx.strokeStyle = isGreen ? "#22c55e" : "#ef4444";
-
-      // Wick
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(x, yScale(bar.high));
-      ctx.lineTo(x, yScale(bar.low));
-      ctx.stroke();
-
-      // Body
-      const bodyTop = yScale(Math.max(bar.open, bar.close));
-      const bodyBot = yScale(Math.min(bar.open, bar.close));
-      const bodyH = Math.max(1, bodyBot - bodyTop);
-      ctx.fillRect(x - barWidth / 2, bodyTop, barWidth, bodyH);
-    });
-
-    // Volume bars at bottom
-    const maxVol = Math.max(...visible.map((d) => d.volume));
-    const volH = chartH * 0.15;
-    visible.forEach((bar, i) => {
-      const x = xScale(i);
-      const isGreen = bar.close >= bar.open;
-      ctx.fillStyle = isGreen ? "rgba(34,197,94,0.3)" : "rgba(239,68,68,0.3)";
-      const bh = (bar.volume / maxVol) * volH;
-      ctx.fillRect(x - barWidth / 2, padding.top + chartH - bh, barWidth, bh);
-    });
-  }, [data]);
+  const change = hover ? hover.close - hover.open : 0;
+  const changePct = hover && hover.open ? (change / hover.open) * 100 : 0;
 
   return (
     <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4">
-      <h2 className="text-sm font-medium text-[var(--text-muted)] mb-2">Price Chart (Last 120 days)</h2>
-      <canvas ref={canvasRef} className="w-full" style={{ height: 350 }} />
+      {/* Header row: title + filters */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <h2 className="text-sm font-medium text-[var(--text-muted)]">Price Chart</h2>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Interval toggle */}
+          <div className="flex rounded-lg border border-[var(--border)] overflow-hidden">
+            {(["daily", "minute"] as const).map((iv) => (
+              <button
+                key={iv}
+                onClick={() => setInterval_(iv)}
+                className={`px-3 py-1 text-xs font-medium transition-colors ${
+                  interval === iv
+                    ? "bg-[var(--blue)] text-white"
+                    : "bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-[var(--text)]"
+                }`}
+              >
+                {iv === "daily" ? "Daily" : "1-Minute"}
+              </button>
+            ))}
+          </div>
+
+          {/* Range pills */}
+          <div className="flex gap-1">
+            {ranges.map((r) => (
+              <button
+                key={r.label}
+                onClick={() => setDays(r.days)}
+                className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                  days === r.days
+                    ? "bg-[var(--bg-hover)] text-[var(--text)] border border-[var(--border)]"
+                    : "text-[var(--text-muted)] hover:text-[var(--text)]"
+                }`}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Sync button */}
+          <button
+            onClick={handleSync}
+            disabled={syncing}
+            className="px-3 py-1 rounded text-xs font-medium bg-[var(--bg-hover)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)] disabled:opacity-50"
+          >
+            {syncing ? "Syncing…" : "Sync Live Data"}
+          </button>
+        </div>
+      </div>
+
+      {syncMsg && <p className="text-xs text-[var(--text-muted)] mb-2">{syncMsg}</p>}
+
+      {/* OHLC legend / readout — tracks the crosshair, defaults to the latest bar */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mb-2 text-xs font-mono min-h-[16px]">
+        {hover && (
+          <>
+            <span className="text-[var(--text-muted)]">
+              {interval === "minute"
+                ? new Date(hover.timestamp).toLocaleString()
+                : new Date(hover.timestamp).toLocaleDateString()}
+            </span>
+            <span>
+              O <span className="text-[var(--text)]">{hover.open.toFixed(2)}</span>
+            </span>
+            <span>
+              H <span className="text-[var(--text)]">{hover.high.toFixed(2)}</span>
+            </span>
+            <span>
+              L <span className="text-[var(--text)]">{hover.low.toFixed(2)}</span>
+            </span>
+            <span>
+              C{" "}
+              <span className={change >= 0 ? "text-[var(--green)]" : "text-[var(--red)]"}>
+                {hover.close.toFixed(2)}
+              </span>
+            </span>
+            <span className={change >= 0 ? "text-[var(--green)]" : "text-[var(--red)]"}>
+              {change >= 0 ? "+" : ""}
+              {change.toFixed(2)} ({changePct.toFixed(2)}%)
+            </span>
+            <span className="text-[var(--text-muted)]">Vol {hover.volume.toLocaleString()}</span>
+          </>
+        )}
+      </div>
+
+      {/* Chart canvas, with loading/empty overlays */}
+      <div className="relative">
+        <div ref={containerRef} className="w-full" style={{ height: 380 }} />
+        {loading && (
+          <div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-card)]/70 text-sm text-[var(--text-muted)]">
+            Loading…
+          </div>
+        )}
+        {!loading && bars.length === 0 && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-sm text-[var(--text-muted)] bg-[var(--bg-card)]">
+            <p>{loadError || `No ${interval} data yet for ${ticker}.`}</p>
+            <button
+              onClick={handleSync}
+              disabled={syncing}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[var(--blue)] text-white hover:brightness-110 disabled:opacity-50"
+            >
+              {syncing ? "Syncing…" : "Sync Live Data"}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Color legend */}
+      <div className="flex items-center gap-4 mt-3 pt-3 border-t border-[var(--border)] text-xs text-[var(--text-muted)]">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: "#22c55e" }} />
+          Bullish (close ≥ open)
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: "#ef4444" }} />
+          Bearish (close &lt; open)
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-2.5 h-2.5 rounded-sm bg-[var(--text-muted)] opacity-40" />
+          Volume
+        </span>
+      </div>
     </div>
   );
 }
@@ -586,7 +808,18 @@ function NewsPanel({
                     </span>
                   )}
                 </div>
-                <p className="text-sm font-medium mb-1">{a.title}</p>
+                {a.url ? (
+                  <a
+                    href={a.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm font-medium mb-1 block hover:text-[var(--blue)] hover:underline"
+                  >
+                    {a.title}
+                  </a>
+                ) : (
+                  <p className="text-sm font-medium mb-1">{a.title}</p>
+                )}
                 <p className="text-xs text-[var(--text-muted)] line-clamp-2">{a.summary}</p>
               </div>
             </div>

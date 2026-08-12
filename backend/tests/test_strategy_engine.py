@@ -114,7 +114,7 @@ async def test_reasoning_uses_claude_when_available(monkeypatch):
     )
 
     fake_response = MagicMock()
-    fake_response.content = [MagicMock(text="Claude-generated reasoning paragraph.")]
+    fake_response.content = [MagicMock(type="text", text="Claude-generated reasoning paragraph.")]
     fake_client = MagicMock()
     fake_client.messages.create.return_value = fake_response
     monkeypatch.setattr("anthropic.Anthropic", lambda api_key: fake_client)

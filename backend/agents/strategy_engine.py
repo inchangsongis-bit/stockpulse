@@ -6,7 +6,7 @@ This is the final decision layer.
 
 import json
 from typing import Any, Dict
-from agents.base import BaseAgent
+from agents.base import BaseAgent, extract_claude_text
 from config import get_settings
 
 
@@ -170,8 +170,8 @@ class StrategyEngineAgent(BaseAgent):
             except Exception as e:
                 import anthropic
 
-                if isinstance(e, anthropic.APIError):
-                    self.log(f"Claude API error: {e}, falling back to template reasoning")
+                if isinstance(e, (anthropic.APIError, ValueError)):
+                    self.log(f"Claude reasoning failed: {e}, falling back to template reasoning")
                 else:
                     raise
 
@@ -235,9 +235,9 @@ and news factors drove the decision. Do NOT give financial advice — describe t
 Write the reasoning as a single paragraph, no bullet points."""
 
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-5",
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
 
-        return response.content[0].text
+        return extract_claude_text(response)
