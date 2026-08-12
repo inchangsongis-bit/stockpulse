@@ -17,12 +17,14 @@ ARTICLES = [
     {
         "title": "Company beats earnings expectations",
         "source": "Reuters",
+        "url": "https://example.com/beats-earnings",
         "summary": "Strong quarter with record growth",
         "relevance": 0.9,
     },
     {
         "title": "Analysts warn of slowdown risk",
         "source": "CNBC",
+        "url": "https://example.com/slowdown-risk",
         "summary": "Concerns about weak demand and recession",
         "relevance": 0.7,
     },
@@ -40,6 +42,8 @@ async def test_run_with_no_api_key_uses_rule_based_sentiment(monkeypatch):
 
     assert profile["ticker"] == "SPY"
     assert len(profile["article_scores"]) == 2
+    for s in profile["article_scores"]:
+        assert s["url"]  # every score carries the article's url for downstream matching
     # bullish article should score above the bearish one
     scores_by_title = {s["title"]: s["sentiment"] for s in profile["article_scores"]}
     assert scores_by_title["Company beats earnings expectations"] > scores_by_title["Analysts warn of slowdown risk"]
@@ -133,3 +137,82 @@ async def test_claude_sentiment_skips_thinking_block_and_strips_markdown_fence(m
     scores = {s["title"]: s["sentiment"] for s in profile["article_scores"]}
     assert scores["Company beats earnings expectations"] == 0.6
     assert scores["Analysts warn of slowdown risk"] == -0.4
+
+
+@pytest.mark.asyncio
+async def test_cached_sentiment_skips_claude_entirely_when_all_articles_cached(monkeypatch):
+    monkeypatch.setattr(
+        "agents.sentiment_analyst.get_settings",
+        lambda: FakeSettings(anthropic_api_key="sk-ant-valid"),
+    )
+    fake_client = MagicMock()
+    monkeypatch.setattr("anthropic.Anthropic", lambda api_key: fake_client)
+
+    cached_sentiment = {
+        a["url"]: {
+            "title": a["title"], "source": a["source"], "url": a["url"],
+            "sentiment": 0.5, "source_credibility": 0.9,
+            "expected_impact": "medium", "reasoning": "cached reasoning",
+        }
+        for a in ARTICLES
+    }
+
+    agent = SentimentAnalystAgent()
+    profile = await agent.run("SPY", {
+        "research": {"articles": ARTICLES, "date": "2024-01-01"},
+        "cached_sentiment": cached_sentiment,
+    })
+
+    fake_client.messages.create.assert_not_called()
+    assert len(profile["article_scores"]) == 2
+    for s in profile["article_scores"]:
+        assert s["sentiment"] == 0.5
+        assert s["reasoning"] == "cached reasoning"
+    # relevance is refreshed from the current article data, not cached
+    scores_by_title = {s["title"]: s["relevance"] for s in profile["article_scores"]}
+    assert scores_by_title["Company beats earnings expectations"] == 0.9
+    assert scores_by_title["Analysts warn of slowdown risk"] == 0.7
+
+
+@pytest.mark.asyncio
+async def test_cached_sentiment_only_scores_uncached_articles(monkeypatch):
+    monkeypatch.setattr(
+        "agents.sentiment_analyst.get_settings",
+        lambda: FakeSettings(anthropic_api_key="sk-ant-valid"),
+    )
+
+    # Only the second article needs scoring — Claude's response is keyed
+    # 1-based against whatever subset it was actually sent.
+    json_reply = (
+        '[{"index": 1, "sentiment": -0.4, "source_credibility": 0.8, '
+        '"expected_impact": "medium", "reasoning": "Slowdown risk"}]'
+    )
+    fake_response = MagicMock()
+    fake_response.content = [MagicMock(type="text", text=json_reply)]
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = fake_response
+    monkeypatch.setattr("anthropic.Anthropic", lambda api_key: fake_client)
+
+    cached_sentiment = {
+        ARTICLES[0]["url"]: {
+            "title": ARTICLES[0]["title"], "source": ARTICLES[0]["source"], "url": ARTICLES[0]["url"],
+            "sentiment": 0.5, "source_credibility": 0.9,
+            "expected_impact": "medium", "reasoning": "cached reasoning",
+        }
+    }
+
+    agent = SentimentAnalystAgent()
+    profile = await agent.run("SPY", {
+        "research": {"articles": ARTICLES, "date": "2024-01-01"},
+        "cached_sentiment": cached_sentiment,
+    })
+
+    fake_client.messages.create.assert_called_once()
+    prompt_sent = fake_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "Analysts warn of slowdown risk" in prompt_sent
+    assert "Company beats earnings expectations" not in prompt_sent  # cached article wasn't re-sent to Claude
+
+    assert len(profile["article_scores"]) == 2
+    scores_by_title = {s["title"]: s["sentiment"] for s in profile["article_scores"]}
+    assert scores_by_title["Company beats earnings expectations"] == 0.5   # from cache
+    assert scores_by_title["Analysts warn of slowdown risk"] == -0.4        # freshly scored

@@ -38,15 +38,19 @@ class NewsResearcherAgent(BaseAgent):
                     "category": a["category"],
                     "published_at": a["published_at"].isoformat() if isinstance(a["published_at"], datetime) else a["published_at"],
                     "relevance": a["relevance"],
+                    "external_id": a.get("external_id"),
                 }
                 for a in articles
             ],
         }
 
     async def _fetch_live_news(self, ticker: str) -> List[Dict[str, Any]]:
-        """Placeholder for live API calls (Finnhub, Alpha Vantage)."""
-        # TODO: Implement when API keys are provided
-        # import httpx
-        # async with httpx.AsyncClient() as client:
-        #     resp = await client.get(f"https://finnhub.io/api/v1/company-news", params={...})
-        return []
+        """Fetch real news from Finnhub. Falls back to an empty list on failure
+        so the pipeline degrades gracefully rather than crashing."""
+        from data_sources.finnhub import fetch_company_news, FinnhubError
+
+        try:
+            return await fetch_company_news(ticker)
+        except FinnhubError as e:
+            self.log(f"Finnhub fetch failed: {e}, returning empty article list")
+            return []

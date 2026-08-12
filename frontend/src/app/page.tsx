@@ -68,6 +68,7 @@ interface PipelineResult {
     article_scores: Array<{
       title: string;
       source: string;
+      url: string;
       sentiment: number;
       expected_impact: string;
     }>;
@@ -765,8 +766,9 @@ function NewsPanel({
   articles: PipelineResult["research"]["articles"];
   sentimentScores: PipelineResult["sentiment_profile"]["article_scores"];
 }) {
-  // Match scores to articles by title
-  const scoreMap = new Map(sentimentScores.map((s) => [s.title, s]));
+  // Match scores to articles by url — titles aren't guaranteed unique
+  // once real (non-mock) articles are in play.
+  const scoreMap = new Map(sentimentScores.map((s) => [s.url, s]));
 
   return (
     <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-5">
@@ -775,7 +777,7 @@ function NewsPanel({
       </h3>
       <div className="space-y-3">
         {articles.map((a, i) => {
-          const score = scoreMap.get(a.title);
+          const score = scoreMap.get(a.url);
           const sentiment = score?.sentiment ?? 0;
 
           return (

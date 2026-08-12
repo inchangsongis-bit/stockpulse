@@ -24,11 +24,32 @@ class SentimentAnalystAgent(BaseAgent):
             return self._empty_profile(ticker)
 
         settings = get_settings()
-        if settings.anthropic_api_key:
-            article_scores = await self._claude_sentiment(articles, ticker)
+
+        # Skip re-scoring articles we already have a cached sentiment score
+        # for (keyed by URL) — relevance is always refreshed from the
+        # current fetch since it's a function of *this run's* recency
+        # window, not a static property of the article.
+        cached_sentiment: Dict[str, dict] = context.get("cached_sentiment", {})
+        cached_scores, to_score = [], []
+        for a in articles:
+            cached = cached_sentiment.get(a.get("url"))
+            if cached:
+                cached_scores.append({**cached, "relevance": a["relevance"]})
+            else:
+                to_score.append(a)
+
+        if cached_scores:
+            self.log(f"Using cached sentiment for {len(cached_scores)} articles, scoring {len(to_score)} new")
+
+        if not to_score:
+            new_scores = []
+        elif settings.anthropic_api_key:
+            new_scores = await self._claude_sentiment(to_score, ticker)
         else:
             self.log("No Anthropic API key — using rule-based sentiment")
-            article_scores = self._rule_based_sentiment(articles)
+            new_scores = self._rule_based_sentiment(to_score)
+
+        article_scores = cached_scores + new_scores
 
         # Aggregate: weighted by relevance and recency
         if article_scores:
@@ -108,6 +129,7 @@ Return ONLY the JSON array, no other text."""
                     result.append({
                         "title": articles[idx]["title"],
                         "source": articles[idx]["source"],
+                        "url": articles[idx].get("url", ""),
                         "sentiment": float(score["sentiment"]),
                         "source_credibility": float(score["source_credibility"]),
                         "expected_impact": score["expected_impact"],
@@ -165,6 +187,7 @@ Return ONLY the JSON array, no other text."""
             results.append({
                 "title": a["title"],
                 "source": a.get("source", "unknown"),
+                "url": a.get("url", ""),
                 "sentiment": round(sentiment, 3),
                 "source_credibility": source_cred,
                 "expected_impact": impact,
