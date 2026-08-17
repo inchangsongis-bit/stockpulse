@@ -7,8 +7,21 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 import httpx
+from ftfy import fix_text, TextFixerConfig
 
 from config import get_settings
+
+# Some upstream sources Finnhub aggregates from (e.g. SeekingAlpha) send
+# already mojibake'd text — UTF-8 bytes re-decoded as Windows-1252 and
+# re-encoded, e.g. "Friday's" becomes "Fridayâ€™s". fix_text repairs this
+# in place; already-correct text round-trips unchanged. uncurl_quotes is
+# turned off so we don't flatten legitimate curly quotes in text that was
+# never broken to begin with.
+_TEXT_FIX_CONFIG = TextFixerConfig(uncurl_quotes=False)
+
+
+def _clean_text(value: str) -> str:
+    return fix_text(value, config=_TEXT_FIX_CONFIG) if value else value
 
 
 class FinnhubError(Exception):
@@ -69,10 +82,10 @@ async def fetch_company_news(ticker: str, days: int = 7, limit: int = 15) -> Lis
             continue
         published_at = datetime.fromtimestamp(r["datetime"])
         articles.append({
-            "title": r["headline"],
+            "title": _clean_text(r["headline"]),
             "source": r.get("source", "unknown"),
             "url": r.get("url", ""),
-            "summary": r.get("summary", ""),
+            "summary": _clean_text(r.get("summary", "")),
             "category": r.get("category", "general"),
             "published_at": published_at,
             "relevance": _relevance_from_recency(published_at, window_start, window_end),

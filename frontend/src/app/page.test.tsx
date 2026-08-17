@@ -125,12 +125,59 @@ describe("Dashboard", () => {
     mockFetchSequence({
       "/ohlcv": () => jsonResponse(OHLCV_BODY),
       "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/stocks/SPY/news": () => jsonResponse({ ticker: "SPY", count: 0, articles: [] }),
     });
 
     render(<Dashboard />);
 
     expect(await screen.findByText("$345.11")).toBeInTheDocument();
     expect(screen.getByText(/No signals yet/i)).toBeInTheDocument();
+  });
+
+  it("renders persisted news history independent of running the pipeline", async () => {
+    mockFetchSequence({
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/stocks/SPY/news": () =>
+        jsonResponse({
+          ticker: "SPY",
+          count: 1,
+          articles: [
+            {
+              title: "Fed Signals Rate Cut",
+              source: "Reuters",
+              url: "https://reuters.com/mock/fed-rate-cut",
+              summary: "The Fed hinted at a rate cut.",
+              category: "macro",
+              published_at: "2026-08-10T12:00:00",
+              relevance: 0.9,
+              sentiment: 0.7,
+              source_credibility: 0.95,
+              expected_impact: "high",
+              reasoning: "Dovish signal",
+            },
+          ],
+        }),
+    });
+
+    render(<Dashboard />);
+
+    expect(await screen.findByText("News History")).toBeInTheDocument();
+    const link = await screen.findByRole("link", { name: /fed signals rate cut/i });
+    expect(link).toHaveAttribute("href", "https://reuters.com/mock/fed-rate-cut");
+    expect(screen.getByText("+0.7")).toBeInTheDocument();
+  });
+
+  it("shows an empty state for news history when nothing is persisted yet", async () => {
+    mockFetchSequence({
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/stocks/SPY/news": () => jsonResponse({ ticker: "SPY", count: 0, articles: [] }),
+    });
+
+    render(<Dashboard />);
+
+    expect(await screen.findByText(/No persisted news yet/i)).toBeInTheDocument();
   });
 
   it("runs the pipeline and renders the resulting signal", async () => {
