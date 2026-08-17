@@ -73,6 +73,36 @@ async def test_fetch_company_news_maps_fields(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fetch_company_news_repairs_mojibake_but_leaves_good_text_alone(monkeypatch):
+    monkeypatch.setattr("data_sources.finnhub.get_settings", lambda: FakeSettings())
+    raw = [
+        make_raw(
+            article_id=1,
+            headline="Fridayâ\x80\x99s July employment report",
+            summary="Fridayâ\x80\x99s numbers surprised economists.",
+        ),
+        make_raw(
+            article_id=2,
+            headline="Wednesday’s CPI report",
+            summary="Small‑cap stocks rallied ahead of the print.",
+        ),
+    ]
+    monkeypatch.setattr(
+        "data_sources.finnhub.httpx.AsyncClient",
+        lambda *a, **k: FakeAsyncClient(FakeResponse(200, raw)),
+    )
+
+    articles = await fetch_company_news("SPY")
+    by_id = {a["external_id"]: a for a in articles}
+
+    assert by_id[1]["title"] == "Friday’s July employment report"
+    assert by_id[1]["summary"] == "Friday’s numbers surprised economists."
+    # Already-correct text (including legitimate curly quotes) is untouched
+    assert by_id[2]["title"] == "Wednesday’s CPI report"
+    assert by_id[2]["summary"] == "Small‑cap stocks rallied ahead of the print."
+
+
+@pytest.mark.asyncio
 async def test_fetch_company_news_filters_junk_rows(monkeypatch):
     monkeypatch.setattr("data_sources.finnhub.get_settings", lambda: FakeSettings())
     raw = [

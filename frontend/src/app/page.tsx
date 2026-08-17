@@ -278,6 +278,8 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      <NewsHistoryPanel ticker={ticker} />
     </div>
   );
 }
@@ -759,6 +761,21 @@ function TechnicalPanel({ profile }: { profile: PipelineResult["technical_profil
   );
 }
 
+function SentimentBadge({ sentiment }: { sentiment: number }) {
+  return (
+    <div
+      className="w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold shrink-0"
+      style={{
+        backgroundColor: sentiment > 0.1 ? "rgba(34,197,94,0.2)" : sentiment < -0.1 ? "rgba(239,68,68,0.2)" : "rgba(136,136,160,0.2)",
+        color: sentiment > 0.1 ? "var(--green)" : sentiment < -0.1 ? "var(--red)" : "var(--text-muted)",
+      }}
+    >
+      {sentiment > 0 ? "+" : ""}
+      {sentiment.toFixed(1)}
+    </div>
+  );
+}
+
 function NewsPanel({
   articles,
   sentimentScores,
@@ -784,16 +801,7 @@ function NewsPanel({
             <div key={i} className="p-3 rounded-lg bg-[var(--bg-hover)] flex gap-3">
               {/* Sentiment indicator */}
               <div className="flex flex-col items-center justify-center min-w-[48px]">
-                <div
-                  className="w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold"
-                  style={{
-                    backgroundColor: sentiment > 0.1 ? "rgba(34,197,94,0.2)" : sentiment < -0.1 ? "rgba(239,68,68,0.2)" : "rgba(136,136,160,0.2)",
-                    color: sentiment > 0.1 ? "var(--green)" : sentiment < -0.1 ? "var(--red)" : "var(--text-muted)",
-                  }}
-                >
-                  {sentiment > 0 ? "+" : ""}
-                  {sentiment.toFixed(1)}
-                </div>
+                <SentimentBadge sentiment={sentiment} />
               </div>
 
               <div className="flex-1 min-w-0">
@@ -828,6 +836,128 @@ function NewsPanel({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+interface NewsHistoryArticle {
+  title: string;
+  source: string;
+  url: string;
+  summary: string;
+  category: string;
+  published_at: string | null;
+  relevance: number;
+  sentiment: number | null;
+  source_credibility: number | null;
+  expected_impact: string | null;
+  reasoning: string | null;
+}
+
+const NEWS_HISTORY_RANGES = [
+  { label: "7D", days: 7 },
+  { label: "30D", days: 30 },
+  { label: "90D", days: 90 },
+];
+
+function NewsHistoryPanel({ ticker }: { ticker: string }) {
+  const [days, setDays] = useState(30);
+  const [articles, setArticles] = useState<NewsHistoryArticle[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    setLoadError(null);
+    fetch(`${API}/api/stocks/${ticker}/news?days=${days}`)
+      .then((r) => r.json())
+      .then((d) => setArticles(d.articles || []))
+      .catch(() => setLoadError("Failed to load news history."))
+      .finally(() => setLoading(false));
+  }, [ticker, days]);
+
+  return (
+    <div className="mt-6">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <h2 className="text-lg font-semibold">News History</h2>
+        <div className="flex gap-1">
+          {NEWS_HISTORY_RANGES.map((r) => (
+            <button
+              key={r.label}
+              onClick={() => setDays(r.days)}
+              className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                days === r.days
+                  ? "bg-[var(--bg-hover)] text-[var(--text)] border border-[var(--border)]"
+                  : "text-[var(--text-muted)] hover:text-[var(--text)]"
+              }`}
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {loading && <p className="text-sm text-[var(--text-muted)]">Loading…</p>}
+
+      {!loading && loadError && <p className="text-sm text-[var(--red)]">{loadError}</p>}
+
+      {!loading && !loadError && articles.length === 0 && (
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-6 text-center text-[var(--text-muted)]">
+          <p className="text-sm">
+            No persisted news yet for {ticker} in the last {days} days. Persisted history builds up
+            each time the analysis pipeline runs with a Finnhub key configured — mock runs don&apos;t
+            write here.
+          </p>
+        </div>
+      )}
+
+      {!loading && !loadError && articles.length > 0 && (
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-5">
+          <p className="text-sm font-medium text-[var(--text-muted)] mb-4">
+            {articles.length} article{articles.length === 1 ? "" : "s"} · last {days} days
+          </p>
+          <div className="space-y-3">
+            {articles.map((a, i) => (
+              <div key={i} className="p-3 rounded-lg bg-[var(--bg-hover)] flex gap-3">
+                <div className="flex flex-col items-center justify-center min-w-[48px]">
+                  <SentimentBadge sentiment={a.sentiment ?? 0} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--bg-card)] text-[var(--text-muted)]">
+                      {a.source}
+                    </span>
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--bg-card)] text-[var(--purple)]">
+                      {a.category}
+                    </span>
+                    {a.expected_impact && (
+                      <span className="text-xs text-[var(--text-muted)]">Impact: {a.expected_impact}</span>
+                    )}
+                    {a.published_at && (
+                      <span className="text-xs text-[var(--text-muted)] ml-auto">
+                        {new Date(a.published_at).toLocaleDateString()}
+                      </span>
+                    )}
+                  </div>
+                  {a.url ? (
+                    <a
+                      href={a.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-sm font-medium mb-1 block hover:text-[var(--blue)] hover:underline"
+                    >
+                      {a.title}
+                    </a>
+                  ) : (
+                    <p className="text-sm font-medium mb-1">{a.title}</p>
+                  )}
+                  <p className="text-xs text-[var(--text-muted)] line-clamp-2">{a.summary}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
