@@ -23,6 +23,11 @@ interface OHLCVBar {
   vwap?: number;
 }
 
+interface WatchlistEntry {
+  ticker: string;
+  added_at: string | null;
+}
+
 interface Signal {
   id: number;
   timestamp: string;
@@ -88,13 +93,72 @@ interface PipelineResult {
 // ── Main Dashboard ──
 
 export default function Dashboard() {
-  const [ticker] = useState("SPY");
+  const [ticker, setTicker] = useState("SPY");
+  const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
+  const [watchlistError, setWatchlistError] = useState<string | null>(null);
   const [ohlcv, setOhlcv] = useState<OHLCVBar[]>([]);
   const [signals, setSignals] = useState<Signal[]>([]);
   const [pipelineResult, setPipelineResult] = useState<PipelineResult | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"signal" | "technical" | "news">("signal");
+
+  // Fetch watchlist once on mount
+  useEffect(() => {
+    fetch(`${API}/api/watchlist/`)
+      .then((r) => r.json())
+      .then((d) => setWatchlist(d.tickers || []))
+      .catch(() => {});
+  }, []);
+
+  // A pipeline result / error belongs to whichever ticker produced it —
+  // don't leave it showing after switching to a different ticker.
+  useEffect(() => {
+    setPipelineResult(null);
+    setError(null);
+  }, [ticker]);
+
+  const addTicker = useCallback(async (newTicker: string) => {
+    setWatchlistError(null);
+    try {
+      const res = await fetch(`${API}/api/watchlist/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticker: newTicker }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setWatchlistError(data.detail || `Could not add ${newTicker}.`);
+        return;
+      }
+      setWatchlist((w) => [...w, { ticker: data.ticker, added_at: new Date().toISOString() }]);
+      setTicker(data.ticker);
+    } catch {
+      setWatchlistError("Failed to add ticker — is the backend running?");
+    }
+  }, []);
+
+  const removeTicker = useCallback(
+    async (target: string) => {
+      setWatchlistError(null);
+      try {
+        const res = await fetch(`${API}/api/watchlist/${target}`, { method: "DELETE" });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          setWatchlistError(data.detail || `Could not remove ${target}.`);
+          return;
+        }
+        const next = watchlist.filter((entry) => entry.ticker !== target);
+        setWatchlist(next);
+        if (target === ticker && next.length > 0) {
+          setTicker(next[0].ticker);
+        }
+      } catch {
+        setWatchlistError("Failed to remove ticker — is the backend running?");
+      }
+    },
+    [ticker, watchlist]
+  );
 
   // Fetch OHLCV data
   useEffect(() => {
@@ -171,6 +235,15 @@ export default function Dashboard() {
           {running ? "Running Pipeline..." : "Run Analysis Pipeline"}
         </button>
       </div>
+
+      <WatchlistBar
+        watchlist={watchlist}
+        activeTicker={ticker}
+        onSelect={setTicker}
+        onAdd={addTicker}
+        onRemove={removeTicker}
+        error={watchlistError}
+      />
 
       {error && (
         <div className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">
@@ -285,6 +358,76 @@ export default function Dashboard() {
 }
 
 // ── Components ──
+
+function WatchlistBar({
+  watchlist,
+  activeTicker,
+  onSelect,
+  onAdd,
+  onRemove,
+  error,
+}: {
+  watchlist: WatchlistEntry[];
+  activeTicker: string;
+  onSelect: (ticker: string) => void;
+  onAdd: (ticker: string) => void;
+  onRemove: (ticker: string) => void;
+  error: string | null;
+}) {
+  const [input, setInput] = useState("");
+
+  const handleAdd = () => {
+    const t = input.trim();
+    if (!t) return;
+    onAdd(t);
+    setInput("");
+  };
+
+  return (
+    <div className="mb-4">
+      <div className="flex flex-wrap items-center gap-2">
+        {watchlist.map((w) => (
+          <div
+            key={w.ticker}
+            className={`flex items-center gap-1.5 pl-3 pr-1.5 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
+              w.ticker === activeTicker
+                ? "bg-[var(--blue)] text-white border-[var(--blue)]"
+                : "bg-[var(--bg-card)] text-[var(--text-muted)] border-[var(--border)] hover:text-[var(--text)]"
+            }`}
+          >
+            <button onClick={() => onSelect(w.ticker)}>{w.ticker}</button>
+            {watchlist.length > 1 && (
+              <button
+                onClick={() => onRemove(w.ticker)}
+                aria-label={`Remove ${w.ticker}`}
+                className={`w-4 h-4 flex items-center justify-center rounded-full text-xs leading-none ${
+                  w.ticker === activeTicker ? "hover:bg-white/20" : "hover:bg-[var(--bg-hover)]"
+                }`}
+              >
+                ×
+              </button>
+            )}
+          </div>
+        ))}
+
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value.toUpperCase())}
+          onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+          placeholder="Add ticker"
+          className="w-24 px-2.5 py-1.5 rounded-lg text-sm bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--blue)]"
+        />
+        <button
+          onClick={handleAdd}
+          className="px-3 py-1.5 rounded-lg text-sm font-medium bg-[var(--bg-hover)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)]"
+        >
+          + Add
+        </button>
+      </div>
+      {error && <p className="text-xs text-[var(--red)] mt-1.5">{error}</p>}
+    </div>
+  );
+}
 
 type ChartInterval = "daily" | "minute";
 

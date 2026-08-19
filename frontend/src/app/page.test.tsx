@@ -96,13 +96,15 @@ const PIPELINE_RESULT_WITH_NEWS = {
   },
 };
 
-function mockFetchSequence(handlers: Record<string, () => Promise<Response>>) {
-  global.fetch = jest.fn((url: string) => {
+function mockFetchSequence(
+  handlers: Record<string, (url: string, options?: RequestInit) => Promise<Response>>
+) {
+  global.fetch = jest.fn((url: string, options?: RequestInit) => {
     const match = Object.keys(handlers).find((key) => url.includes(key));
     if (!match) {
       return Promise.reject(new Error(`Unmocked fetch: ${url}`));
     }
-    return handlers[match]();
+    return handlers[match](url, options);
   }) as jest.Mock;
 }
 
@@ -126,12 +128,80 @@ describe("Dashboard", () => {
       "/ohlcv": () => jsonResponse(OHLCV_BODY),
       "/api/signals/SPY": () => jsonResponse({ signals: [] }),
       "/api/stocks/SPY/news": () => jsonResponse({ ticker: "SPY", count: 0, articles: [] }),
+      "/api/watchlist/": () => jsonResponse({ tickers: [{ ticker: "SPY", added_at: null }] }),
     });
 
     render(<Dashboard />);
 
     expect(await screen.findByText("$345.11")).toBeInTheDocument();
     expect(screen.getByText(/No signals yet/i)).toBeInTheDocument();
+  });
+
+  it("switches ticker and refetches its data when a watchlist pill is clicked", async () => {
+    const AAPL_OHLCV = { ticker: "AAPL", count: 2, data: [makeBar(180, 1), makeBar(185, 0)] };
+    mockFetchSequence({
+      "/api/watchlist/": () =>
+        jsonResponse({
+          tickers: [
+            { ticker: "SPY", added_at: null },
+            { ticker: "AAPL", added_at: null },
+          ],
+        }),
+      "/api/stocks/AAPL/ohlcv": () => jsonResponse(AAPL_OHLCV),
+      "/api/signals/AAPL": () => jsonResponse({ signals: [] }),
+      "/api/stocks/AAPL/news": () => jsonResponse({ ticker: "AAPL", count: 0, articles: [] }),
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/stocks/SPY/news": () => jsonResponse({ ticker: "SPY", count: 0, articles: [] }),
+    });
+
+    const user = userEvent.setup();
+    render(<Dashboard />);
+
+    expect(await screen.findByText("$345.11")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "AAPL" }));
+
+    expect(await screen.findByText("$185.00")).toBeInTheDocument();
+  });
+
+  it("adds a new ticker to the watchlist and switches to it", async () => {
+    mockFetchSequence({
+      "/api/watchlist/": (url, options) => {
+        if (options?.method === "POST") {
+          return jsonResponse({ status: "added", ticker: "TSLA" });
+        }
+        return jsonResponse({ tickers: [{ ticker: "SPY", added_at: null }] });
+      },
+      "/api/stocks/TSLA/ohlcv": () => jsonResponse({ ticker: "TSLA", count: 0, data: [] }),
+      "/api/signals/TSLA": () => jsonResponse({ signals: [] }),
+      "/api/stocks/TSLA/news": () => jsonResponse({ ticker: "TSLA", count: 0, articles: [] }),
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/stocks/SPY/news": () => jsonResponse({ ticker: "SPY", count: 0, articles: [] }),
+    });
+
+    const user = userEvent.setup();
+    render(<Dashboard />);
+
+    await screen.findByText("$345.11");
+    await user.type(screen.getByPlaceholderText("Add ticker"), "tsla");
+    await user.click(screen.getByRole("button", { name: "+ Add" }));
+
+    expect(await screen.findByRole("button", { name: "TSLA" })).toBeInTheDocument();
+  });
+
+  it("does not allow removing the only ticker in the watchlist", async () => {
+    mockFetchSequence({
+      "/api/watchlist/": () => jsonResponse({ tickers: [{ ticker: "SPY", added_at: null }] }),
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/stocks/SPY/news": () => jsonResponse({ ticker: "SPY", count: 0, articles: [] }),
+    });
+
+    render(<Dashboard />);
+
+    await screen.findByText("$345.11");
+    expect(screen.queryByRole("button", { name: /remove spy/i })).not.toBeInTheDocument();
   });
 
   it("renders persisted news history independent of running the pipeline", async () => {
