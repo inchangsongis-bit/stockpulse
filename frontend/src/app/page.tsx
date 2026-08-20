@@ -9,7 +9,7 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 
-const API = "http://localhost:8000";
+const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const TICKER_STORAGE_KEY = "stockpulse:ticker";
 
 // ── Types ──
