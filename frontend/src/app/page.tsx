@@ -10,6 +10,7 @@ import {
 } from "lightweight-charts";
 
 const API = "http://localhost:8000";
+const TICKER_STORAGE_KEY = "stockpulse:ticker";
 
 // ── Types ──
 
@@ -96,6 +97,7 @@ export default function Dashboard() {
   const [ticker, setTicker] = useState("SPY");
   const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
   const [watchlistError, setWatchlistError] = useState<string | null>(null);
+  const [addingTicker, setAddingTicker] = useState(false);
   const [ohlcv, setOhlcv] = useState<OHLCVBar[]>([]);
   const [signals, setSignals] = useState<Signal[]>([]);
   const [pipelineResult, setPipelineResult] = useState<PipelineResult | null>(null);
@@ -111,6 +113,18 @@ export default function Dashboard() {
       .catch(() => {});
   }, []);
 
+  // Restore the last-selected ticker after mount (client-only — reading
+  // localStorage during the initial render would mismatch the server-
+  // rendered "SPY" default and trigger a hydration error).
+  useEffect(() => {
+    const saved = window.localStorage.getItem(TICKER_STORAGE_KEY);
+    if (saved) setTicker(saved);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(TICKER_STORAGE_KEY, ticker);
+  }, [ticker]);
+
   // A pipeline result / error belongs to whichever ticker produced it —
   // don't leave it showing after switching to a different ticker.
   useEffect(() => {
@@ -120,6 +134,7 @@ export default function Dashboard() {
 
   const addTicker = useCallback(async (newTicker: string) => {
     setWatchlistError(null);
+    setAddingTicker(true);
     try {
       const res = await fetch(`${API}/api/watchlist/`, {
         method: "POST",
@@ -132,9 +147,22 @@ export default function Dashboard() {
         return;
       }
       setWatchlist((w) => [...w, { ticker: data.ticker, added_at: new Date().toISOString() }]);
+
+      // Best-effort: pull real daily data so the ticker isn't empty by
+      // default. If this fails (e.g. an invalid symbol upstream), the
+      // ticker is still added — the chart's own empty state offers a
+      // manual "Sync Live Data" retry.
+      try {
+        await fetch(`${API}/api/stocks/${data.ticker}/sync?interval=daily`, { method: "POST" });
+      } catch {
+        // ignored — see comment above
+      }
+
       setTicker(data.ticker);
     } catch {
       setWatchlistError("Failed to add ticker — is the backend running?");
+    } finally {
+      setAddingTicker(false);
     }
   }, []);
 
@@ -243,6 +271,7 @@ export default function Dashboard() {
         onAdd={addTicker}
         onRemove={removeTicker}
         error={watchlistError}
+        adding={addingTicker}
       />
 
       {error && (
@@ -366,6 +395,7 @@ function WatchlistBar({
   onAdd,
   onRemove,
   error,
+  adding,
 }: {
   watchlist: WatchlistEntry[];
   activeTicker: string;
@@ -373,12 +403,13 @@ function WatchlistBar({
   onAdd: (ticker: string) => void;
   onRemove: (ticker: string) => void;
   error: string | null;
+  adding: boolean;
 }) {
   const [input, setInput] = useState("");
 
   const handleAdd = () => {
     const t = input.trim();
-    if (!t) return;
+    if (!t || adding) return;
     onAdd(t);
     setInput("");
   };
@@ -415,13 +446,15 @@ function WatchlistBar({
           onChange={(e) => setInput(e.target.value.toUpperCase())}
           onKeyDown={(e) => e.key === "Enter" && handleAdd()}
           placeholder="Add ticker"
-          className="w-24 px-2.5 py-1.5 rounded-lg text-sm bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--blue)]"
+          disabled={adding}
+          className="w-24 px-2.5 py-1.5 rounded-lg text-sm bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--blue)] disabled:opacity-50"
         />
         <button
           onClick={handleAdd}
-          className="px-3 py-1.5 rounded-lg text-sm font-medium bg-[var(--bg-hover)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)]"
+          disabled={adding}
+          className="px-3 py-1.5 rounded-lg text-sm font-medium bg-[var(--bg-hover)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)] disabled:opacity-50 disabled:cursor-wait"
         >
-          + Add
+          {adding ? "Adding…" : "+ Add"}
         </button>
       </div>
       {error && <p className="text-xs text-[var(--red)] mt-1.5">{error}</p>}
