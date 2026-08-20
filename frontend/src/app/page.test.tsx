@@ -168,6 +168,40 @@ describe("Dashboard", () => {
     expect(await screen.findByText("$185.00")).toBeInTheDocument();
   });
 
+  it("clears a stale sync confirmation message when switching tickers", async () => {
+    const AAPL_OHLCV = { ticker: "AAPL", count: 2, data: [makeBar(180, 1), makeBar(185, 0)] };
+    mockFetchSequence({
+      "/api/watchlist/": () =>
+        jsonResponse({
+          tickers: [
+            { ticker: "SPY", added_at: null },
+            { ticker: "AAPL", added_at: null },
+          ],
+        }),
+      "/api/stocks/SPY/sync": () =>
+        jsonResponse({ ticker: "SPY", interval: "daily", synced_bars: 251, latest_close: 769.06 }),
+      "/api/stocks/AAPL/ohlcv": () => jsonResponse(AAPL_OHLCV),
+      "/api/signals/AAPL": () => jsonResponse({ signals: [] }),
+      "/api/stocks/AAPL/news": () => jsonResponse({ ticker: "AAPL", count: 0, articles: [] }),
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/stocks/SPY/news": () => jsonResponse({ ticker: "SPY", count: 0, articles: [] }),
+    });
+
+    const user = userEvent.setup();
+    render(<Dashboard />);
+
+    await screen.findByText("$345.11");
+    await user.click(screen.getByRole("button", { name: "Sync Live Data" }));
+
+    expect(await screen.findByText(/Synced 251 bars/i)).toBeInTheDocument();
+
+    await user.click(await screen.findByRole("button", { name: "AAPL" }));
+    await screen.findByText("$185.00");
+
+    expect(screen.queryByText(/Synced 251 bars/i)).not.toBeInTheDocument();
+  });
+
   it("restores the last-selected ticker across a remount (simulating a page reload)", async () => {
     const AAPL_OHLCV = { ticker: "AAPL", count: 2, data: [makeBar(180, 1), makeBar(185, 0)] };
     const handlers = {
