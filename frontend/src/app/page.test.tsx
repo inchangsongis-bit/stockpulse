@@ -121,6 +121,10 @@ describe("Dashboard", () => {
     // clearAllMocks (not resetAllMocks) — resetting would also wipe the
     // lightweight-charts mock's implementation set up in jest.mock() above.
     jest.clearAllMocks();
+    // The Dashboard persists the selected ticker to localStorage, which
+    // jsdom does not reset between tests on its own — without this, a
+    // ticker switch in one test leaks into the next test's initial render.
+    window.localStorage.clear();
   });
 
   it("loads OHLCV data and renders the latest price", async () => {
@@ -164,13 +168,53 @@ describe("Dashboard", () => {
     expect(await screen.findByText("$185.00")).toBeInTheDocument();
   });
 
-  it("adds a new ticker to the watchlist and switches to it", async () => {
+  it("restores the last-selected ticker across a remount (simulating a page reload)", async () => {
+    const AAPL_OHLCV = { ticker: "AAPL", count: 2, data: [makeBar(180, 1), makeBar(185, 0)] };
+    const handlers = {
+      "/api/watchlist/": () =>
+        jsonResponse({
+          tickers: [
+            { ticker: "SPY", added_at: null },
+            { ticker: "AAPL", added_at: null },
+          ],
+        }),
+      "/api/stocks/AAPL/ohlcv": () => jsonResponse(AAPL_OHLCV),
+      "/api/signals/AAPL": () => jsonResponse({ signals: [] }),
+      "/api/stocks/AAPL/news": () => jsonResponse({ ticker: "AAPL", count: 0, articles: [] }),
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/stocks/SPY/news": () => jsonResponse({ ticker: "SPY", count: 0, articles: [] }),
+    };
+    mockFetchSequence(handlers);
+
+    const user = userEvent.setup();
+    const { unmount } = render(<Dashboard />);
+    await screen.findByText("$345.11");
+    await user.click(await screen.findByRole("button", { name: "AAPL" }));
+    await screen.findByText("$185.00");
+    unmount();
+
+    // A fresh mount reads the persisted ticker from localStorage — this is
+    // the client-only effect run, so the component briefly renders the
+    // SPY default before switching, same as it would after a real reload.
+    mockFetchSequence(handlers);
+    render(<Dashboard />);
+
+    expect(await screen.findByText("$185.00")).toBeInTheDocument();
+  });
+
+  it("adds a new ticker, auto-syncs real data for it, and switches to it", async () => {
+    const syncCalls: string[] = [];
     mockFetchSequence({
       "/api/watchlist/": (url, options) => {
         if (options?.method === "POST") {
           return jsonResponse({ status: "added", ticker: "TSLA" });
         }
         return jsonResponse({ tickers: [{ ticker: "SPY", added_at: null }] });
+      },
+      "/api/stocks/TSLA/sync": (url, options) => {
+        syncCalls.push(`${options?.method} ${url}`);
+        return jsonResponse({ ticker: "TSLA", interval: "daily", synced_bars: 250, latest_close: 250.5 });
       },
       "/api/stocks/TSLA/ohlcv": () => jsonResponse({ ticker: "TSLA", count: 0, data: [] }),
       "/api/signals/TSLA": () => jsonResponse({ signals: [] }),
@@ -188,6 +232,35 @@ describe("Dashboard", () => {
     await user.click(screen.getByRole("button", { name: "+ Add" }));
 
     expect(await screen.findByRole("button", { name: "TSLA" })).toBeInTheDocument();
+    expect(syncCalls).toEqual(["POST http://localhost:8000/api/stocks/TSLA/sync?interval=daily"]);
+  });
+
+  it("still adds and switches to the ticker even if the auto-sync request fails", async () => {
+    mockFetchSequence({
+      "/api/watchlist/": (url, options) => {
+        if (options?.method === "POST") {
+          return jsonResponse({ status: "added", ticker: "TSLA" });
+        }
+        return jsonResponse({ tickers: [{ ticker: "SPY", added_at: null }] });
+      },
+      "/api/stocks/TSLA/sync": () => Promise.reject(new Error("upstream unavailable")),
+      "/api/stocks/TSLA/ohlcv": () => jsonResponse({ ticker: "TSLA", count: 0, data: [] }),
+      "/api/signals/TSLA": () => jsonResponse({ signals: [] }),
+      "/api/stocks/TSLA/news": () => jsonResponse({ ticker: "TSLA", count: 0, articles: [] }),
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/stocks/SPY/news": () => jsonResponse({ ticker: "SPY", count: 0, articles: [] }),
+    });
+
+    const user = userEvent.setup();
+    render(<Dashboard />);
+
+    await screen.findByText("$345.11");
+    await user.type(screen.getByPlaceholderText("Add ticker"), "tsla");
+    await user.click(screen.getByRole("button", { name: "+ Add" }));
+
+    expect(await screen.findByRole("button", { name: "TSLA" })).toBeInTheDocument();
+    expect(await screen.findByText(/No daily data yet for TSLA/i)).toBeInTheDocument();
   });
 
   it("does not allow removing the only ticker in the watchlist", async () => {
