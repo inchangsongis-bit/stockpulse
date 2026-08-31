@@ -6,6 +6,7 @@ from typing import Optional
 from database import get_db
 from models import OHLCV, NewsArticle
 from data_sources.polygon import fetch_ohlcv, PolygonError
+from data_sources.finnhub import fetch_company_news, FinnhubError
 
 router = APIRouter(prefix="/api/stocks", tags=["stocks"])
 
@@ -96,6 +97,64 @@ async def sync_ohlcv(
             "end": bars[-1]["timestamp"].isoformat(),
         },
         "latest_close": bars[-1]["close"],
+    }
+
+
+@router.post("/{ticker}/news/sync")
+async def sync_news(
+    ticker: str,
+    days: int = Query(default=7, ge=1, le=30),
+    limit: int = Query(default=15, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Fetch and persist real news articles for a ticker WITHOUT scoring
+    sentiment — no Claude calls, just retrieval + storage. Deliberately
+    separate from the analysis pipeline (POST /api/pipeline/run/{ticker}),
+    which is the only other place news gets fetched, but couples it to a
+    full (paid) sentiment-scoring pass. Existing sentiment columns on
+    already-persisted articles are left untouched; new rows are stored
+    with those columns null until something scores them later.
+    """
+    ticker = ticker.upper()
+    try:
+        articles = await fetch_company_news(ticker, days=days, limit=limit)
+    except FinnhubError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if not articles:
+        raise HTTPException(status_code=502, detail=f"No news found for {ticker}")
+
+    urls = [a["url"] for a in articles if a.get("url")]
+    existing_by_url = {}
+    if urls:
+        existing_result = await db.execute(
+            select(NewsArticle).where(NewsArticle.ticker == ticker, NewsArticle.url.in_(urls))
+        )
+        existing_by_url = {row.url: row for row in existing_result.scalars().all()}
+
+    new_count = 0
+    for a in articles:
+        row = existing_by_url.get(a.get("url"))
+        if row is None:
+            row = NewsArticle(ticker=ticker, url=a.get("url"))
+            db.add(row)
+            new_count += 1
+        row.title = a["title"]
+        row.source = a["source"]
+        row.summary = a["summary"]
+        row.category = a["category"]
+        row.published_at = a["published_at"]
+        row.relevance = a["relevance"]
+        row.external_id = a.get("external_id")
+
+    await db.commit()
+
+    return {
+        "ticker": ticker,
+        "fetched": len(articles),
+        "new": new_count,
+        "updated": len(articles) - new_count,
     }
 
 
