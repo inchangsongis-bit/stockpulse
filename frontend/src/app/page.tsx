@@ -520,6 +520,14 @@ function PriceChartPanel({ ticker }: { ticker: string }) {
       .finally(() => setLoading(false));
   }, [ticker, days, interval]);
 
+  // A stale sync confirmation from a previous ticker/interval shouldn't
+  // linger once the view has moved on — but this must NOT fire from
+  // loadBars() itself, since handleSync calls loadBars() right after
+  // setting the success message for the *same* ticker/interval.
+  useEffect(() => {
+    setSyncMsg(null);
+  }, [ticker, interval]);
+
   useEffect(() => {
     loadBars();
   }, [loadBars]);
