@@ -7,6 +7,7 @@ Falls back to rule-based scoring if no API key is configured.
 import json
 from typing import Any, Dict, List
 from agents.base import BaseAgent, extract_claude_text
+from analysis.news_heuristics import source_credibility, impact_from_relevance
 from config import get_settings
 
 
@@ -154,13 +155,6 @@ Return ONLY the JSON array, no other text."""
             "contraction", "recession", "inflation", "unemployment rises",
         }
 
-        # Source credibility lookup
-        credibility = {
-            "Reuters": 0.95, "Bloomberg": 0.95, "Wall Street Journal": 0.92,
-            "CNBC": 0.85, "Financial Times": 0.92, "Associated Press": 0.90,
-            "SEC.gov": 0.98, "TechCrunch": 0.70,
-        }
-
         results = []
         for a in articles:
             text = (a.get("title", "") + " " + a.get("summary", "")).lower()
@@ -173,16 +167,8 @@ Return ONLY the JSON array, no other text."""
                 sentiment = (bull - bear) / total
                 sentiment = max(min(sentiment, 1.0), -1.0)
 
-            source_cred = credibility.get(a.get("source", ""), 0.5)
-
-            # Impact based on relevance
-            rel = a.get("relevance", 0.5)
-            if rel > 0.85:
-                impact = "high"
-            elif rel > 0.6:
-                impact = "medium"
-            else:
-                impact = "low"
+            source_cred = source_credibility(a.get("source", ""))
+            impact = impact_from_relevance(a.get("relevance", 0.5))
 
             results.append({
                 "title": a["title"],

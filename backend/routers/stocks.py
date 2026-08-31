@@ -7,6 +7,8 @@ from database import get_db
 from models import OHLCV, NewsArticle
 from data_sources.polygon import fetch_ohlcv, PolygonError
 from data_sources.finnhub import fetch_company_news, FinnhubError
+from analysis.finbert_sentiment import score_text
+from analysis.news_heuristics import source_credibility, impact_from_relevance
 
 router = APIRouter(prefix="/api/stocks", tags=["stocks"])
 
@@ -156,6 +158,41 @@ async def sync_news(
         "new": new_count,
         "updated": len(articles) - new_count,
     }
+
+
+@router.post("/{ticker}/news/score")
+async def score_news_sentiment(
+    ticker: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Score persisted-but-unscored news articles for a ticker via FinBERT —
+    a free, local model (no Claude calls, no per-article cost). Only
+    fills in articles where sentiment is currently null; never touches
+    an article that already has a score (e.g. from a prior Claude-scored
+    pipeline run), so this is safe to run repeatedly without downgrading
+    better-quality existing scores.
+    """
+    ticker = ticker.upper()
+    result = await db.execute(
+        select(NewsArticle)
+        .where(NewsArticle.ticker == ticker, NewsArticle.sentiment.is_(None))
+        .limit(limit)
+    )
+    rows = result.scalars().all()
+
+    for row in rows:
+        sentiment, label, confidence = score_text(f"{row.title}. {row.summary or ''}")
+        row.sentiment = sentiment
+        row.source_credibility = source_credibility(row.source or "")
+        row.expected_impact = impact_from_relevance(row.relevance or 0.5)
+        row.reasoning = f"FinBERT: {label} (confidence {confidence:.2f})"
+        row.sentiment_scored_at = datetime.now()
+
+    await db.commit()
+
+    return {"ticker": ticker, "scored": len(rows)}
 
 
 @router.get("/{ticker}/news")
