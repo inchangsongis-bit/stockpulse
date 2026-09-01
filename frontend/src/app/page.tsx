@@ -24,9 +24,19 @@ interface OHLCVBar {
   vwap?: number;
 }
 
-interface WatchlistEntry {
+interface WatchlistSummaryEntry {
   ticker: string;
-  added_at: string | null;
+  price: number | null;
+  signal: { action: string; confidence: number; timestamp: string } | null;
+}
+
+interface RunAllStatus {
+  running: boolean;
+  trigger: string | null;
+  total: number;
+  completed: number;
+  current_ticker: string | null;
+  errors: Record<string, string>;
 }
 
 interface Signal {
@@ -95,7 +105,7 @@ interface PipelineResult {
 
 export default function Dashboard() {
   const [ticker, setTicker] = useState("SPY");
-  const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
+  const [summary, setSummary] = useState<WatchlistSummaryEntry[]>([]);
   const [watchlistError, setWatchlistError] = useState<string | null>(null);
   const [addingTicker, setAddingTicker] = useState(false);
   const [ohlcv, setOhlcv] = useState<OHLCVBar[]>([]);
@@ -104,14 +114,61 @@ export default function Dashboard() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"signal" | "technical" | "news">("signal");
+  const [refreshAllStatus, setRefreshAllStatus] = useState<RunAllStatus | null>(null);
 
-  // Fetch watchlist once on mount
-  useEffect(() => {
-    fetch(`${API}/api/watchlist/`)
+  // Watchlist tickers + their latest price/signal, for the BUY/SELL/HOLD
+  // grouped overview — one call instead of 2 requests per ticker.
+  const fetchSummary = useCallback(() => {
+    return fetch(`${API}/api/watchlist/summary`)
       .then((r) => r.json())
-      .then((d) => setWatchlist(d.tickers || []))
+      .then((d) => setSummary(d.tickers || []))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    fetchSummary();
+  }, [fetchSummary]);
+
+  const refreshAll = useCallback(async () => {
+    try {
+      await fetch(`${API}/api/pipeline/run-all`, { method: "POST" });
+    } catch {
+      // The status poll below will simply keep showing "idle" — acceptable
+      // no-op if the backend is unreachable.
+    }
+  }, []);
+
+  // Poll run-all progress continuously (cheap local GET) so both a manual
+  // "Refresh All" click and the daily scheduled job (which runs with no
+  // user action) show up here the same way.
+  useEffect(() => {
+    let cancelled = false;
+    let wasRunning = false;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API}/api/pipeline/run-all/status`);
+        const data: RunAllStatus = await res.json();
+        if (cancelled) return;
+        setRefreshAllStatus(data);
+        if (data.running) {
+          wasRunning = true;
+        } else if (wasRunning) {
+          wasRunning = false;
+          fetchSummary(); // pick up newly-generated signals
+        }
+      } catch {
+        // ignore transient poll failures
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [fetchSummary]);
 
   // Restore the last-selected ticker after mount (client-only — reading
   // localStorage during the initial render would mismatch the server-
@@ -146,7 +203,7 @@ export default function Dashboard() {
         setWatchlistError(data.detail || `Could not add ${newTicker}.`);
         return;
       }
-      setWatchlist((w) => [...w, { ticker: data.ticker, added_at: new Date().toISOString() }]);
+      setSummary((s) => [...s, { ticker: data.ticker, price: null, signal: null }]);
 
       // Best-effort: pull real daily data so the ticker isn't empty by
       // default. If this fails (e.g. an invalid symbol upstream), the
@@ -176,8 +233,8 @@ export default function Dashboard() {
           setWatchlistError(data.detail || `Could not remove ${target}.`);
           return;
         }
-        const next = watchlist.filter((entry) => entry.ticker !== target);
-        setWatchlist(next);
+        const next = summary.filter((entry) => entry.ticker !== target);
+        setSummary(next);
         if (target === ticker && next.length > 0) {
           setTicker(next[0].ticker);
         }
@@ -185,7 +242,7 @@ export default function Dashboard() {
         setWatchlistError("Failed to remove ticker — is the backend running?");
       }
     },
-    [ticker, watchlist]
+    [ticker, summary]
   );
 
   // Fetch OHLCV data
@@ -264,14 +321,21 @@ export default function Dashboard() {
         </button>
       </div>
 
-      <WatchlistBar
-        watchlist={watchlist}
-        activeTicker={ticker}
+      <TickerSearchBox
+        tickers={summary.map((s) => s.ticker)}
         onSelect={setTicker}
         onAdd={addTicker}
-        onRemove={removeTicker}
-        error={watchlistError}
         adding={addingTicker}
+        error={watchlistError}
+      />
+
+      <SignalOverviewPanel
+        summary={summary}
+        activeTicker={ticker}
+        onSelect={setTicker}
+        onRemove={removeTicker}
+        onRefreshAll={refreshAll}
+        refreshStatus={refreshAllStatus}
       />
 
       {error && (
@@ -388,76 +452,218 @@ export default function Dashboard() {
 
 // ── Components ──
 
-function WatchlistBar({
-  watchlist,
-  activeTicker,
+// Compact search-or-add combobox — replaces the old row of ticker chips.
+// Typing filters the existing watchlist; if nothing matches exactly, an
+// "Add" option appears to add it as a new ticker.
+function TickerSearchBox({
+  tickers,
   onSelect,
   onAdd,
-  onRemove,
-  error,
   adding,
+  error,
 }: {
-  watchlist: WatchlistEntry[];
-  activeTicker: string;
+  tickers: string[];
   onSelect: (ticker: string) => void;
   onAdd: (ticker: string) => void;
-  onRemove: (ticker: string) => void;
-  error: string | null;
   adding: boolean;
+  error: string | null;
 }) {
   const [input, setInput] = useState("");
+  const [open, setOpen] = useState(false);
+
+  const query = input.trim().toUpperCase();
+  const matches = query ? tickers.filter((t) => t.includes(query)).slice(0, 8) : [];
+  const exactMatch = tickers.includes(query);
+
+  const handleSelect = (t: string) => {
+    onSelect(t);
+    setInput("");
+    setOpen(false);
+  };
 
   const handleAdd = () => {
-    const t = input.trim();
-    if (!t || adding) return;
-    onAdd(t);
+    if (!query || adding) return;
+    onAdd(query);
     setInput("");
+    setOpen(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== "Enter") return;
+    if (exactMatch) handleSelect(query);
+    else handleAdd();
   };
 
   return (
-    <div className="mb-4">
-      <div className="flex flex-wrap items-center gap-2">
-        {watchlist.map((w) => (
-          <div
-            key={w.ticker}
-            className={`flex items-center gap-1.5 pl-3 pr-1.5 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
-              w.ticker === activeTicker
-                ? "bg-[var(--blue)] text-white border-[var(--blue)]"
-                : "bg-[var(--bg-card)] text-[var(--text-muted)] border-[var(--border)] hover:text-[var(--text)]"
-            }`}
-          >
-            <button onClick={() => onSelect(w.ticker)}>{w.ticker}</button>
-            {watchlist.length > 1 && (
-              <button
-                onClick={() => onRemove(w.ticker)}
-                aria-label={`Remove ${w.ticker}`}
-                className={`w-4 h-4 flex items-center justify-center rounded-full text-xs leading-none ${
-                  w.ticker === activeTicker ? "hover:bg-white/20" : "hover:bg-[var(--bg-hover)]"
-                }`}
-              >
-                ×
-              </button>
-            )}
-          </div>
-        ))}
+    <div className="relative mb-4 max-w-xs">
+      <input
+        value={input}
+        onChange={(e) => {
+          setInput(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onKeyDown={handleKeyDown}
+        placeholder="Search or add ticker"
+        disabled={adding}
+        className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--blue)] disabled:opacity-50"
+      />
+      {open && query && (matches.length > 0 || !exactMatch) && (
+        <div className="absolute z-10 mt-1 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-card)] shadow-lg overflow-hidden">
+          {matches.map((t) => (
+            <button
+              key={t}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => handleSelect(t)}
+              className="block w-full text-left px-3 py-2 text-sm text-[var(--text)] hover:bg-[var(--bg-hover)]"
+            >
+              {t}
+            </button>
+          ))}
+          {!exactMatch && (
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={handleAdd}
+              disabled={adding}
+              className="block w-full text-left px-3 py-2 text-sm text-[var(--blue)] hover:bg-[var(--bg-hover)] border-t border-[var(--border)] disabled:opacity-50"
+            >
+              {adding ? "Adding…" : `+ Add "${query}" to watchlist`}
+            </button>
+          )}
+        </div>
+      )}
+      {error && <p className="text-xs text-[var(--red)] mt-1.5">{error}</p>}
+    </div>
+  );
+}
 
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value.toUpperCase())}
-          onKeyDown={(e) => e.key === "Enter" && handleAdd()}
-          placeholder="Add ticker"
-          disabled={adding}
-          className="w-24 px-2.5 py-1.5 rounded-lg text-sm bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--blue)] disabled:opacity-50"
-        />
+type SignalFilter = "all" | "BUY" | "SELL" | "HOLD" | "none";
+
+// The BUY/SELL/HOLD grouped watchlist overview — segmented filter tabs
+// over a compact, scrollable list (see CLAUDE.md-style rationale: this
+// scales far better than a card grid or a chip row once the watchlist
+// has 50+ tickers).
+function SignalOverviewPanel({
+  summary,
+  activeTicker,
+  onSelect,
+  onRemove,
+  onRefreshAll,
+  refreshStatus,
+}: {
+  summary: WatchlistSummaryEntry[];
+  activeTicker: string;
+  onSelect: (ticker: string) => void;
+  onRemove: (ticker: string) => void;
+  onRefreshAll: () => void;
+  refreshStatus: RunAllStatus | null;
+}) {
+  const [filter, setFilter] = useState<SignalFilter>("all");
+
+  const counts = {
+    all: summary.length,
+    BUY: summary.filter((s) => s.signal?.action === "BUY").length,
+    SELL: summary.filter((s) => s.signal?.action === "SELL").length,
+    HOLD: summary.filter((s) => s.signal?.action === "HOLD").length,
+    none: summary.filter((s) => !s.signal).length,
+  };
+
+  const filtered =
+    filter === "all"
+      ? summary
+      : filter === "none"
+      ? summary.filter((s) => !s.signal)
+      : summary.filter((s) => s.signal?.action === filter);
+
+  const refreshing = refreshStatus?.running ?? false;
+
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4 mb-6">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+        <h2 className="text-sm font-medium text-[var(--text-muted)]">Watchlist Signals</h2>
         <button
-          onClick={handleAdd}
-          disabled={adding}
-          className="px-3 py-1.5 rounded-lg text-sm font-medium bg-[var(--bg-hover)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)] disabled:opacity-50 disabled:cursor-wait"
+          onClick={onRefreshAll}
+          disabled={refreshing}
+          className="px-3 py-1 rounded text-xs font-medium bg-[var(--bg-hover)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)] disabled:opacity-50 disabled:cursor-wait"
         >
-          {adding ? "Adding…" : "+ Add"}
+          {refreshing
+            ? `Refreshing… ${refreshStatus!.completed}/${refreshStatus!.total}${
+                refreshStatus!.current_ticker ? ` (${refreshStatus!.current_ticker})` : ""
+              }`
+            : "Refresh All"}
         </button>
       </div>
-      {error && <p className="text-xs text-[var(--red)] mt-1.5">{error}</p>}
+
+      <div className="flex flex-wrap gap-1 mb-3">
+        {(
+          [
+            ["all", "All"],
+            ["BUY", "BUY"],
+            ["SELL", "SELL"],
+            ["HOLD", "HOLD"],
+            ["none", "No Signal"],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => setFilter(key)}
+            className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+              filter === key
+                ? "bg-[var(--blue)] text-white"
+                : "bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-[var(--text)]"
+            }`}
+          >
+            {label} ({counts[key]})
+          </button>
+        ))}
+      </div>
+
+      <div className="max-h-72 overflow-y-auto rounded-lg border border-[var(--border)] divide-y divide-[var(--border)]">
+        {filtered.length === 0 ? (
+          <p className="p-4 text-sm text-[var(--text-muted)] text-center">No tickers in this category.</p>
+        ) : (
+          filtered.map((s) => (
+            <div
+              key={s.ticker}
+              className={`flex items-center gap-3 px-3 py-2 text-sm transition-colors ${
+                s.ticker === activeTicker ? "bg-[var(--blue)]/10" : "hover:bg-[var(--bg-hover)]"
+              }`}
+            >
+              <button
+                onClick={() => onSelect(s.ticker)}
+                className={`font-semibold w-16 text-left ${
+                  s.ticker === activeTicker ? "text-[var(--blue)]" : "text-[var(--text)]"
+                }`}
+              >
+                {s.ticker}
+              </button>
+              <span className="w-20 font-mono text-[var(--text-muted)]">
+                {s.price != null ? `$${s.price.toFixed(2)}` : "—"}
+              </span>
+              <span className="flex-1 flex items-center gap-2">
+                {s.signal ? (
+                  <>
+                    <ActionBadge action={s.signal.action} />
+                    <span className="text-xs text-[var(--text-muted)]">{s.signal.confidence}%</span>
+                  </>
+                ) : (
+                  <span className="text-xs text-[var(--text-muted)]">Not analyzed yet</span>
+                )}
+              </span>
+              {summary.length > 1 && (
+                <button
+                  onClick={() => onRemove(s.ticker)}
+                  aria-label={`Remove ${s.ticker}`}
+                  className="w-5 h-5 flex items-center justify-center rounded-full text-xs leading-none text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)]"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          ))
+        )}
+      </div>
     </div>
   );
 }

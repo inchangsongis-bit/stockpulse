@@ -17,8 +17,8 @@ class FakeSettings:
 @pytest.fixture(autouse=True)
 def _default_to_mock_news(monkeypatch):
     """Every test gets mock news (deterministic, no real Finnhub call)
-    unless it explicitly overrides routers.pipeline.get_settings itself."""
-    monkeypatch.setattr("routers.pipeline.get_settings", lambda: FakeSettings(finnhub_api_key=""))
+    unless it explicitly overrides services.pipeline_runner.get_settings itself."""
+    monkeypatch.setattr("services.pipeline_runner.get_settings", lambda: FakeSettings(finnhub_api_key=""))
 
 
 async def seed_bars(session_factory, ticker="SPY", n=60):
@@ -123,7 +123,7 @@ async def test_run_pipeline_mock_mode_does_not_persist_articles(client, session_
 
 @pytest.mark.asyncio
 async def test_run_pipeline_live_mode_persists_articles_and_sentiment(client, session_factory, monkeypatch):
-    monkeypatch.setattr("routers.pipeline.get_settings", lambda: FakeSettings(finnhub_api_key="fh-test"))
+    monkeypatch.setattr("services.pipeline_runner.get_settings", lambda: FakeSettings(finnhub_api_key="fh-test"))
     monkeypatch.setattr("agents.sentiment_analyst.get_settings", lambda: FakeSettings(anthropic_api_key=""))
     monkeypatch.setattr("agents.strategy_engine.get_settings", lambda: FakeSettings(anthropic_api_key=""))
 
@@ -151,7 +151,7 @@ async def test_run_pipeline_live_mode_persists_articles_and_sentiment(client, se
 
 @pytest.mark.asyncio
 async def test_run_pipeline_second_live_run_skips_claude_for_cached_articles(client, session_factory, monkeypatch):
-    monkeypatch.setattr("routers.pipeline.get_settings", lambda: FakeSettings(finnhub_api_key="fh-test"))
+    monkeypatch.setattr("services.pipeline_runner.get_settings", lambda: FakeSettings(finnhub_api_key="fh-test"))
     monkeypatch.setattr(
         "agents.sentiment_analyst.get_settings", lambda: FakeSettings(anthropic_api_key="sk-ant-valid")
     )

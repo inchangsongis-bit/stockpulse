@@ -135,7 +135,8 @@ describe("Dashboard", () => {
       "/ohlcv": () => jsonResponse(OHLCV_BODY),
       "/api/signals/SPY": () => jsonResponse({ signals: [] }),
       "/api/stocks/SPY/news": () => jsonResponse({ ticker: "SPY", count: 0, articles: [] }),
-      "/api/watchlist/": () => jsonResponse({ tickers: [{ ticker: "SPY", added_at: null }] }),
+      "/api/watchlist/summary": () =>
+        jsonResponse({ tickers: [{ ticker: "SPY", price: null, signal: null }] }),
     });
 
     render(<Dashboard />);
@@ -144,14 +145,14 @@ describe("Dashboard", () => {
     expect(screen.getByText(/No signals yet/i)).toBeInTheDocument();
   });
 
-  it("switches ticker and refetches its data when a watchlist pill is clicked", async () => {
+  it("switches ticker and refetches its data when a watchlist row is clicked", async () => {
     const AAPL_OHLCV = { ticker: "AAPL", count: 2, data: [makeBar(180, 1), makeBar(185, 0)] };
     mockFetchSequence({
-      "/api/watchlist/": () =>
+      "/api/watchlist/summary": () =>
         jsonResponse({
           tickers: [
-            { ticker: "SPY", added_at: null },
-            { ticker: "AAPL", added_at: null },
+            { ticker: "SPY", price: null, signal: null },
+            { ticker: "AAPL", price: null, signal: null },
           ],
         }),
       "/api/stocks/AAPL/ohlcv": () => jsonResponse(AAPL_OHLCV),
@@ -174,15 +175,15 @@ describe("Dashboard", () => {
   it("clears a stale sync confirmation message when switching tickers", async () => {
     const AAPL_OHLCV = { ticker: "AAPL", count: 2, data: [makeBar(180, 1), makeBar(185, 0)] };
     mockFetchSequence({
-      "/api/watchlist/": () =>
+      "/api/watchlist/summary": () =>
         jsonResponse({
           tickers: [
-            { ticker: "SPY", added_at: null },
-            { ticker: "AAPL", added_at: null },
+            { ticker: "SPY", price: null, signal: null },
+            { ticker: "AAPL", price: null, signal: null },
           ],
         }),
       "/api/stocks/SPY/sync": () =>
-        jsonResponse({ ticker: "SPY", interval: "daily", synced_bars: 251, latest_close: 769.06 }),
+        jsonResponse({ ticker: "SPY", interval: "daily", mode: "incremental", synced_bars: 251, latest_close: 769.06 }),
       "/api/stocks/AAPL/ohlcv": () => jsonResponse(AAPL_OHLCV),
       "/api/signals/AAPL": () => jsonResponse({ signals: [] }),
       "/api/stocks/AAPL/news": () => jsonResponse({ ticker: "AAPL", count: 0, articles: [] }),
@@ -208,11 +209,11 @@ describe("Dashboard", () => {
   it("restores the last-selected ticker across a remount (simulating a page reload)", async () => {
     const AAPL_OHLCV = { ticker: "AAPL", count: 2, data: [makeBar(180, 1), makeBar(185, 0)] };
     const handlers = {
-      "/api/watchlist/": () =>
+      "/api/watchlist/summary": () =>
         jsonResponse({
           tickers: [
-            { ticker: "SPY", added_at: null },
-            { ticker: "AAPL", added_at: null },
+            { ticker: "SPY", price: null, signal: null },
+            { ticker: "AAPL", price: null, signal: null },
           ],
         }),
       "/api/stocks/AAPL/ohlcv": () => jsonResponse(AAPL_OHLCV),
@@ -240,18 +241,20 @@ describe("Dashboard", () => {
     expect(await screen.findAllByText("$185.00")).not.toHaveLength(0);
   });
 
-  it("adds a new ticker, auto-syncs real data for it, and switches to it", async () => {
+  it("adds a new ticker via the search box, auto-syncs real data for it, and switches to it", async () => {
     const syncCalls: string[] = [];
     mockFetchSequence({
+      "/api/watchlist/summary": () =>
+        jsonResponse({ tickers: [{ ticker: "SPY", price: null, signal: null }] }),
       "/api/watchlist/": (url, options) => {
         if (options?.method === "POST") {
           return jsonResponse({ status: "added", ticker: "TSLA" });
         }
-        return jsonResponse({ tickers: [{ ticker: "SPY", added_at: null }] });
+        return Promise.reject(new Error(`Unmocked fetch: ${url}`));
       },
       "/api/stocks/TSLA/sync": (url, options) => {
         syncCalls.push(`${options?.method} ${url}`);
-        return jsonResponse({ ticker: "TSLA", interval: "daily", synced_bars: 250, latest_close: 250.5 });
+        return jsonResponse({ ticker: "TSLA", interval: "daily", mode: "full", synced_bars: 250, latest_close: 250.5 });
       },
       "/api/stocks/TSLA/ohlcv": () => jsonResponse({ ticker: "TSLA", count: 0, data: [] }),
       "/api/signals/TSLA": () => jsonResponse({ signals: [] }),
@@ -265,8 +268,8 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await screen.findAllByText("$345.11");
-    await user.type(screen.getByPlaceholderText("Add ticker"), "tsla");
-    await user.click(screen.getByRole("button", { name: "+ Add" }));
+    await user.type(screen.getByPlaceholderText("Search or add ticker"), "tsla");
+    await user.click(await screen.findByRole("button", { name: /add "tsla" to watchlist/i }));
 
     expect(await screen.findByRole("button", { name: "TSLA" })).toBeInTheDocument();
     expect(syncCalls).toEqual(["POST http://localhost:8000/api/stocks/TSLA/sync?interval=daily"]);
@@ -274,11 +277,13 @@ describe("Dashboard", () => {
 
   it("still adds and switches to the ticker even if the auto-sync request fails", async () => {
     mockFetchSequence({
+      "/api/watchlist/summary": () =>
+        jsonResponse({ tickers: [{ ticker: "SPY", price: null, signal: null }] }),
       "/api/watchlist/": (url, options) => {
         if (options?.method === "POST") {
           return jsonResponse({ status: "added", ticker: "TSLA" });
         }
-        return jsonResponse({ tickers: [{ ticker: "SPY", added_at: null }] });
+        return Promise.reject(new Error(`Unmocked fetch: ${url}`));
       },
       "/api/stocks/TSLA/sync": () => Promise.reject(new Error("upstream unavailable")),
       "/api/stocks/TSLA/ohlcv": () => jsonResponse({ ticker: "TSLA", count: 0, data: [] }),
@@ -293,8 +298,8 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await screen.findAllByText("$345.11");
-    await user.type(screen.getByPlaceholderText("Add ticker"), "tsla");
-    await user.click(screen.getByRole("button", { name: "+ Add" }));
+    await user.type(screen.getByPlaceholderText("Search or add ticker"), "tsla");
+    await user.click(await screen.findByRole("button", { name: /add "tsla" to watchlist/i }));
 
     expect(await screen.findByRole("button", { name: "TSLA" })).toBeInTheDocument();
     expect(await screen.findByText(/No daily data yet for TSLA/i)).toBeInTheDocument();
@@ -302,7 +307,8 @@ describe("Dashboard", () => {
 
   it("does not allow removing the only ticker in the watchlist", async () => {
     mockFetchSequence({
-      "/api/watchlist/": () => jsonResponse({ tickers: [{ ticker: "SPY", added_at: null }] }),
+      "/api/watchlist/summary": () =>
+        jsonResponse({ tickers: [{ ticker: "SPY", price: null, signal: null }] }),
       "/ohlcv": () => jsonResponse(OHLCV_BODY),
       "/api/signals/SPY": () => jsonResponse({ signals: [] }),
       "/api/stocks/SPY/news": () => jsonResponse({ ticker: "SPY", count: 0, articles: [] }),
@@ -312,6 +318,39 @@ describe("Dashboard", () => {
 
     await screen.findAllByText("$345.11");
     expect(screen.queryByRole("button", { name: /remove spy/i })).not.toBeInTheDocument();
+  });
+
+  it("filters the watchlist overview by signal action", async () => {
+    mockFetchSequence({
+      "/api/watchlist/summary": () =>
+        jsonResponse({
+          tickers: [
+            { ticker: "SPY", price: 500, signal: { action: "BUY", confidence: 60, timestamp: "2026-08-30T00:00:00" } },
+            { ticker: "AAPL", price: 200, signal: { action: "SELL", confidence: 40, timestamp: "2026-08-30T00:00:00" } },
+            { ticker: "MSFT", price: 300, signal: null },
+          ],
+        }),
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/stocks/SPY/news": () => jsonResponse({ ticker: "SPY", count: 0, articles: [] }),
+    });
+
+    const user = userEvent.setup();
+    render(<Dashboard />);
+
+    await screen.findAllByText("$345.11");
+    expect(await screen.findByRole("button", { name: "AAPL" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "MSFT" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "BUY (1)" }));
+
+    expect(screen.getByRole("button", { name: "SPY" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "AAPL" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "MSFT" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "No Signal (1)" }));
+    expect(screen.getByRole("button", { name: "MSFT" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "SPY" })).not.toBeInTheDocument();
   });
 
   it("renders persisted news history independent of running the pipeline", async () => {

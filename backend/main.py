@@ -6,6 +6,8 @@ import json
 from contextlib import asynccontextmanager
 from datetime import datetime
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -13,14 +15,29 @@ from database import init_db, async_session
 from models import OHLCV, Watchlist
 from mock_data import generate_daily_ohlcv
 from routers import stocks, signals, watchlist, pipeline
+from services.bulk_pipeline import run_all as run_pipeline_for_all_watchlist_tickers
+
+scheduler = AsyncIOScheduler()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """On startup: create tables and seed mock data if DB is empty."""
+    """On startup: create tables, seed mock data if DB is empty, and start
+    the daily watchlist-wide pipeline refresh (also triggerable on demand
+    via POST /api/pipeline/run-all — both share services/bulk_pipeline.py's
+    run_all(), which guards against the two overlapping)."""
     await init_db()
     await seed_mock_data()
+    scheduler.add_job(
+        run_pipeline_for_all_watchlist_tickers,
+        CronTrigger(hour=21, minute=0),  # ~4-5pm US/Eastern, after market close
+        kwargs={"trigger": "scheduled"},
+        id="daily_pipeline_refresh",
+        misfire_grace_time=3600,
+    )
+    scheduler.start()
     yield
+    scheduler.shutdown(wait=False)
 
 
 app = FastAPI(
@@ -56,7 +73,10 @@ async def root():
             "GET  /api/stocks/{ticker}/latest",
             "GET  /api/signals/{ticker}",
             "POST /api/pipeline/run/{ticker}",
+            "POST /api/pipeline/run-all",
+            "GET  /api/pipeline/run-all/status",
             "GET  /api/watchlist/",
+            "GET  /api/watchlist/summary",
             "POST /api/watchlist/",
         ],
     }
