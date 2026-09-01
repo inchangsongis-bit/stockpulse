@@ -109,3 +109,44 @@ def build_training_set(bars_by_ticker: dict) -> Tuple[pd.DataFrame, pd.Series]:
 
     valid = X.notna().all(axis=1) & y.notna()
     return X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
+
+
+def build_chronological_split(
+    bars_by_ticker: dict, test_frac: float = 0.2
+) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+    """
+    Splits each ticker's OWN timeline test_frac/rest (not the pooled,
+    ticker-then-time-concatenated array), then concatenates all train
+    pieces and all test pieces. A single cut on the pooled array — the
+    naive approach — mostly separates tickers (whichever land after the
+    cut point alphabetically) rather than separating time, so its "test
+    accuracy" partly measures generalization to unseen tickers instead of
+    the future. This is the split that should actually back any reported
+    accuracy number.
+    """
+    train_X, train_y, test_X, test_y = [], [], [], []
+
+    for ticker, bars in bars_by_ticker.items():
+        if len(bars) < MIN_WARMUP_BARS + HORIZON_MINUTES:
+            continue
+        featured = build_features(bars)
+        labels = build_labels(bars)
+        valid = featured[FEATURE_COLUMNS].notna().all(axis=1) & labels.notna()
+        X = featured.loc[valid, FEATURE_COLUMNS].reset_index(drop=True)
+        y = labels.loc[valid].reset_index(drop=True)
+        if len(X) < 20:
+            continue
+        split = int(len(X) * (1 - test_frac))
+        train_X.append(X.iloc[:split])
+        train_y.append(y.iloc[:split])
+        test_X.append(X.iloc[split:])
+        test_y.append(y.iloc[split:])
+
+    if not train_X:
+        empty = pd.DataFrame(columns=FEATURE_COLUMNS)
+        return empty, pd.Series(dtype=float), empty, pd.Series(dtype=float)
+
+    return (
+        pd.concat(train_X, ignore_index=True), pd.concat(train_y, ignore_index=True),
+        pd.concat(test_X, ignore_index=True), pd.concat(test_y, ignore_index=True),
+    )

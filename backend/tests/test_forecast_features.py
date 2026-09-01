@@ -7,6 +7,7 @@ import pytest
 from analysis.forecast_features import (
     FEATURE_COLUMNS,
     HORIZON_MINUTES,
+    build_chronological_split,
     build_features,
     build_labels,
     build_training_set,
@@ -103,3 +104,31 @@ def test_build_training_set_empty_when_no_ticker_has_enough_bars():
     X, y = build_training_set({"AAA": make_minute_bars([1.0, 2.0, 3.0])})
     assert X.empty
     assert y.empty
+
+
+def test_build_chronological_split_separates_each_tickers_own_timeline():
+    # Two tickers, each 100 bars — splitting on the pooled/concatenated
+    # array (the old approach) would put ~all of AAA in train and ~all of
+    # BBB in test, since AAA's rows come first. A per-ticker split should
+    # instead put each ticker's own *later* bars in its own test set.
+    closes_a = [100 + i * 0.01 for i in range(100)]
+    closes_b = [50 + i * 0.01 for i in range(100)]
+    bars_by_ticker = {
+        "AAA": make_minute_bars(closes_a),
+        "BBB": make_minute_bars(closes_b),
+    }
+
+    X_train, y_train, X_test, y_test = build_chronological_split(bars_by_ticker, test_frac=0.2)
+
+    assert len(X_train) == len(y_train)
+    assert len(X_test) == len(y_test)
+    assert len(X_train) > 0 and len(X_test) > 0
+    # Roughly 80/20 split of the pooled (post-warmup/horizon-trim) rows
+    total = len(X_train) + len(X_test)
+    assert 0.15 < len(X_test) / total < 0.25
+
+
+def test_build_chronological_split_empty_when_no_ticker_has_enough_bars():
+    X_train, y_train, X_test, y_test = build_chronological_split({"AAA": make_minute_bars([1.0, 2.0, 3.0])})
+    assert X_train.empty and X_test.empty
+    assert y_train.empty and y_test.empty
