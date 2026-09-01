@@ -469,7 +469,7 @@ describe("Dashboard", () => {
     expect(await screen.findByText(/Forecast unavailable for SPY/i)).toBeInTheDocument();
   });
 
-  it("renders a successful 5-minute forecast", async () => {
+  it("renders a successful high-conviction 5-minute forecast", async () => {
     mockFetchSequence({
       "/ohlcv": () => jsonResponse(OHLCV_BODY),
       "/api/signals/SPY": () => jsonResponse({ signals: [] }),
@@ -479,6 +479,7 @@ describe("Dashboard", () => {
           direction: "up",
           probability_up: 0.634,
           confidence: 26.8,
+          conviction: "high",
           horizon_minutes: 5,
           as_of: "2026-08-30T12:00:00",
         }),
@@ -489,6 +490,32 @@ describe("Dashboard", () => {
     expect(await screen.findByText("▲ UP")).toBeInTheDocument();
     expect(screen.getByText(/26\.8% confidence/i)).toBeInTheDocument();
     expect(screen.getByText(/P\(up\) 63\.4%/i)).toBeInTheDocument();
+    expect(screen.getByText(/high conviction/i)).toBeInTheDocument();
+    // The coin-flip caveat belongs only on low-conviction readings.
+    expect(screen.queryByText(/close to a coin flip/i)).not.toBeInTheDocument();
+  });
+
+  it("flags a low-conviction 5-minute forecast as close to a coin flip", async () => {
+    mockFetchSequence({
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/forecast/SPY": () =>
+        jsonResponse({
+          ticker: "SPY",
+          direction: "down",
+          probability_up: 0.494,
+          confidence: 1.2,
+          conviction: "low",
+          horizon_minutes: 5,
+          as_of: "2026-08-30T12:00:00",
+        }),
+    });
+
+    render(<Dashboard />);
+
+    expect(await screen.findByText("▼ DOWN")).toBeInTheDocument();
+    expect(screen.getByText(/low conviction/i)).toBeInTheDocument();
+    expect(screen.getByText(/close to a coin flip/i)).toBeInTheDocument();
   });
 
   it("links each news article to its source URL", async () => {

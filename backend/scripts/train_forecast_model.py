@@ -41,6 +41,7 @@ from datetime import datetime
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import accuracy_score, roc_auc_score
@@ -109,6 +110,22 @@ def main():
     print(f"  Test accuracy: {accuracy:.3f}  (baseline coin-flip: 0.500)")
     print(f"  Test AUC:      {auc:.3f}  (baseline coin-flip: 0.500)")
 
+    # Conviction thresholds. Research (scripts/research_forecast_v5.py,
+    # v6.py) found accuracy is NOT uniform across predictions: it rises
+    # monotonically with the model's own confidence, and — importantly —
+    # so does the size of the move being predicted (avg |5-min move| of
+    # 11bps across all predictions vs 31bps in the top 1%). Those
+    # percentile cutoffs are recorded here so the API can tell a
+    # genuinely high-conviction call apart from a coin-flip one, rather
+    # than presenting every prediction as equally meaningful.
+    conf = np.abs(proba - 0.5)
+    high_conviction_cut = float(np.percentile(conf, 99))
+    moderate_conviction_cut = float(np.percentile(conf, 90))
+
+    high_mask = conf >= high_conviction_cut
+    high_acc = accuracy_score(y_test[high_mask], preds[high_mask]) if high_mask.sum() else float("nan")
+    print(f"  Top 1% most-confident accuracy:  {high_acc:.3f}  (n={int(high_mask.sum())})")
+
     # Refit on everything (train + test) for the model actually shipped —
     # the held-out fold above is only to get an honest accuracy estimate,
     # not to withhold each ticker's most recent ~20% from the live model.
@@ -128,6 +145,9 @@ def main():
         "n_test_rows": len(X_test),
         "test_accuracy": round(float(accuracy), 4),
         "test_auc": round(float(auc), 4) if auc == auc else None,
+        "test_accuracy_high_conviction": round(float(high_acc), 4) if high_acc == high_acc else None,
+        "high_conviction_cut": round(high_conviction_cut, 6),
+        "moderate_conviction_cut": round(moderate_conviction_cut, 6),
         "feature_columns": FEATURE_COLUMNS,
         "split_method": "per_ticker_chronological",
     }

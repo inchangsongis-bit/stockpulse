@@ -1142,6 +1142,7 @@ interface ForecastResult {
   direction: "up" | "down";
   probability_up: number;
   confidence: number;
+  conviction: "low" | "moderate" | "high";
   horizon_minutes: number;
   as_of: string;
 }
@@ -1183,18 +1184,48 @@ function ForecastPanel({ ticker }: { ticker: string }) {
   }
 
   const up = forecast.direction === "up";
+  // Backtesting found accuracy is ~50% (a coin flip) on the model's
+  // low-conviction calls but ~56% on its top-1% most confident ones, so
+  // a low-conviction reading is deliberately greyed out rather than
+  // shown in signal colors — presenting it as a real call would be
+  // misleading.
+  const lowConviction = forecast.conviction === "low";
+  const directionColor = lowConviction
+    ? "text-[var(--text-muted)]"
+    : up
+    ? "text-[var(--green)]"
+    : "text-[var(--red)]";
+  const convictionStyles: Record<string, string> = {
+    high: "bg-[var(--blue)] text-white",
+    moderate: "bg-[var(--bg-hover)] text-[var(--text)] border border-[var(--border)]",
+    low: "bg-[var(--bg-hover)] text-[var(--text-muted)] border border-[var(--border)]",
+  };
+
   return (
     <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-5">
-      <h2 className="text-sm font-medium text-[var(--text-muted)] mb-2">Next 5 Minutes</h2>
-      <div className="flex items-center gap-2 mb-1">
-        <span className={`text-2xl font-bold ${up ? "text-[var(--green)]" : "text-[var(--red)]"}`}>
-          {up ? "▲ UP" : "▼ DOWN"}
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-sm font-medium text-[var(--text-muted)]">Next 5 Minutes</h2>
+        <span
+          className={`text-[10px] uppercase tracking-wide font-semibold px-2 py-0.5 rounded-full ${
+            convictionStyles[forecast.conviction] || convictionStyles.low
+          }`}
+        >
+          {forecast.conviction} conviction
         </span>
+      </div>
+      <div className="flex items-center gap-2 mb-1">
+        <span className={`text-2xl font-bold ${directionColor}`}>{up ? "▲ UP" : "▼ DOWN"}</span>
         <span className="text-sm text-[var(--text-muted)]">{forecast.confidence}% confidence</span>
       </div>
       <p className="text-xs text-[var(--text-muted)]">
         P(up) {(forecast.probability_up * 100).toFixed(1)}% — pattern-based estimate, not financial advice
       </p>
+      {lowConviction && (
+        <p className="text-xs text-[var(--text-muted)] mt-2 pt-2 border-t border-[var(--border)]">
+          This one is close to a coin flip — the model is only meaningfully better than
+          chance on its high-conviction calls.
+        </p>
+      )}
     </div>
   );
 }

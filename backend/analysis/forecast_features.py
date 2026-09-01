@@ -20,14 +20,18 @@ import pandas as pd
 
 from analysis.indicators import rsi, sma, volume_sma_ratio
 
+# rsi_7 and volatility_10 were dropped after permutation-importance
+# testing found them to have NEGATIVE importance — shuffling their values
+# IMPROVED held-out AUC, i.e. the model was fitting noise through them.
+# Removing them moved the held-out numbers from 51.91%/0.5238 to
+# 52.01%/0.5252. The remaining five are, in importance order: ret_5,
+# price_vs_sma5, ret_3, ret_1, vol_ratio.
 FEATURE_COLUMNS = [
     "ret_1",
     "ret_3",
     "ret_5",
     "vol_ratio",
-    "rsi_7",
     "price_vs_sma5",
-    "volatility_10",
 ]
 
 HORIZON_MINUTES = 5
@@ -56,8 +60,13 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     out["ret_3"] = close.pct_change(3)
     out["ret_5"] = close.pct_change(5)
     out["vol_ratio"] = volume_sma_ratio(out["volume"], period=20)
-    out["rsi_7"] = rsi(close, period=7)
     out["price_vs_sma5"] = (close - sma5) / sma5
+
+    # Computed but deliberately NOT in FEATURE_COLUMNS — they tested as
+    # net-negative for the model (see FEATURE_COLUMNS' comment). Kept
+    # because the scripts/research_forecast_*.py experiments build on
+    # this function and re-test them.
+    out["rsi_7"] = rsi(close, period=7)
     out["volatility_10"] = close.rolling(window=10).std() / close
 
     return out
