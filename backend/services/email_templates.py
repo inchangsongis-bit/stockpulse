@@ -42,7 +42,7 @@ def _row_html(row: DigestRow) -> str:
 
     return f"""
     <tr>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;font-weight:600;">{ticker}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;font-weight:600;color:#ffffff;">{ticker}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;font-family:monospace;color:#cccccc;">{price}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;">{badge}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;">{confidence}</td>
@@ -90,21 +90,34 @@ def render_daily_digest_html(
 
     return f"""<!doctype html>
 <html>
-<body style="margin:0;padding:0;background:#0a0a0f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;background:#13131f;">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark light">
+  <meta name="supported-color-schemes" content="dark light">
+  <title>StockPulse Daily Signals</title>
+</head>
+<body style="margin:0;padding:0;background-color:#0a0a0f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" bgcolor="#0a0a0f" style="background-color:#0a0a0f;">
     <tr>
-      <td style="padding:24px 12px 8px;">
-        <h1 style="color:#ffffff;font-size:20px;margin:0;">StockPulse Daily Signals</h1>
-        <p style="color:#888888;font-size:12px;margin:4px 0 0;">{as_of.strftime("%A, %B %-d, %Y — %-I:%M %p")}</p>
-      </td>
-    </tr>
-    {body_sections}
-    <tr>
-      <td style="padding:20px 12px;">
-        <p style="color:#666666;font-size:11px;line-height:1.5;margin:0;">
-          For informational purposes only. Not financial advice. AI-generated signals can be wrong.
-        </p>
-        {unsubscribe_html}
+      <td align="center">
+        <table width="100%" cellpadding="0" cellspacing="0" bgcolor="#13131f" style="max-width:600px;margin:0 auto;background-color:#13131f;">
+          <tr>
+            <td style="padding:24px 12px 8px;">
+              <h1 style="color:#ffffff;font-size:20px;margin:0;">StockPulse Daily Signals</h1>
+              <p style="color:#888888;font-size:12px;margin:4px 0 0;">{as_of.strftime("%A, %B %-d, %Y — %-I:%M %p")}</p>
+            </td>
+          </tr>
+          {body_sections}
+          <tr>
+            <td style="padding:20px 12px;">
+              <p style="color:#666666;font-size:11px;line-height:1.5;margin:0;">
+                For informational purposes only. Not financial advice. AI-generated signals can be wrong.
+              </p>
+              {unsubscribe_html}
+            </td>
+          </tr>
+        </table>
       </td>
     </tr>
   </table>
