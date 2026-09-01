@@ -6,6 +6,9 @@ from typing import Optional
 from database import get_db
 from models import OHLCV, NewsArticle
 from data_sources.polygon import fetch_ohlcv, PolygonError
+from data_sources.finnhub import fetch_company_news, FinnhubError
+from analysis.finbert_sentiment import score_text
+from analysis.news_heuristics import source_credibility, impact_from_relevance
 
 router = APIRouter(prefix="/api/stocks", tags=["stocks"])
 
@@ -97,6 +100,99 @@ async def sync_ohlcv(
         },
         "latest_close": bars[-1]["close"],
     }
+
+
+@router.post("/{ticker}/news/sync")
+async def sync_news(
+    ticker: str,
+    days: int = Query(default=7, ge=1, le=30),
+    limit: int = Query(default=15, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Fetch and persist real news articles for a ticker WITHOUT scoring
+    sentiment — no Claude calls, just retrieval + storage. Deliberately
+    separate from the analysis pipeline (POST /api/pipeline/run/{ticker}),
+    which is the only other place news gets fetched, but couples it to a
+    full (paid) sentiment-scoring pass. Existing sentiment columns on
+    already-persisted articles are left untouched; new rows are stored
+    with those columns null until something scores them later.
+    """
+    ticker = ticker.upper()
+    try:
+        articles = await fetch_company_news(ticker, days=days, limit=limit)
+    except FinnhubError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if not articles:
+        raise HTTPException(status_code=502, detail=f"No news found for {ticker}")
+
+    urls = [a["url"] for a in articles if a.get("url")]
+    existing_by_url = {}
+    if urls:
+        existing_result = await db.execute(
+            select(NewsArticle).where(NewsArticle.ticker == ticker, NewsArticle.url.in_(urls))
+        )
+        existing_by_url = {row.url: row for row in existing_result.scalars().all()}
+
+    new_count = 0
+    for a in articles:
+        row = existing_by_url.get(a.get("url"))
+        if row is None:
+            row = NewsArticle(ticker=ticker, url=a.get("url"))
+            db.add(row)
+            new_count += 1
+        row.title = a["title"]
+        row.source = a["source"]
+        row.summary = a["summary"]
+        row.category = a["category"]
+        row.published_at = a["published_at"]
+        row.relevance = a["relevance"]
+        row.external_id = a.get("external_id")
+
+    await db.commit()
+
+    return {
+        "ticker": ticker,
+        "fetched": len(articles),
+        "new": new_count,
+        "updated": len(articles) - new_count,
+    }
+
+
+@router.post("/{ticker}/news/score")
+async def score_news_sentiment(
+    ticker: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Score persisted-but-unscored news articles for a ticker via FinBERT —
+    a free, local model (no Claude calls, no per-article cost). Only
+    fills in articles where sentiment is currently null; never touches
+    an article that already has a score (e.g. from a prior Claude-scored
+    pipeline run), so this is safe to run repeatedly without downgrading
+    better-quality existing scores.
+    """
+    ticker = ticker.upper()
+    result = await db.execute(
+        select(NewsArticle)
+        .where(NewsArticle.ticker == ticker, NewsArticle.sentiment.is_(None))
+        .limit(limit)
+    )
+    rows = result.scalars().all()
+
+    for row in rows:
+        sentiment, label, confidence = score_text(f"{row.title}. {row.summary or ''}")
+        row.sentiment = sentiment
+        row.source_credibility = source_credibility(row.source or "")
+        row.expected_impact = impact_from_relevance(row.relevance or 0.5)
+        row.reasoning = f"FinBERT: {label} (confidence {confidence:.2f})"
+        row.sentiment_scored_at = datetime.now()
+
+    await db.commit()
+
+    return {"ticker": ticker, "scored": len(rows)}
 
 
 @router.get("/{ticker}/news")
