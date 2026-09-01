@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, desc
+from sqlalchemy import select, delete
 from pydantic import BaseModel
 from database import get_db
-from models import OHLCV, Signal, Watchlist
+from models import Watchlist
+from services.watchlist_summary import get_summary_rows
 
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
 
@@ -31,49 +32,7 @@ async def get_watchlist_summary(db: AsyncSession = Depends(get_db)):
     call — powers the BUY/SELL/HOLD grouped overview so the frontend
     doesn't have to make 2 requests per ticker for a 50-ticker watchlist.
     """
-    wl_result = await db.execute(select(Watchlist).order_by(Watchlist.added_at.desc()))
-    tickers = [r.ticker for r in wl_result.scalars().all()]
-    if not tickers:
-        return {"tickers": []}
-
-    # Latest price per ticker, any interval — most recent bar wins. Rows
-    # come back ordered per-ticker by recency, so the first one seen per
-    # ticker is its latest.
-    price_result = await db.execute(
-        select(OHLCV.ticker, OHLCV.close, OHLCV.timestamp)
-        .where(OHLCV.ticker.in_(tickers))
-        .order_by(OHLCV.ticker, desc(OHLCV.timestamp))
-    )
-    latest_price: dict = {}
-    for ticker, close, _ts in price_result.all():
-        latest_price.setdefault(ticker, close)
-
-    # Latest signal per ticker, same "first seen per ticker wins" approach.
-    sig_result = await db.execute(
-        select(Signal).where(Signal.ticker.in_(tickers)).order_by(Signal.ticker, desc(Signal.timestamp))
-    )
-    latest_signal: dict = {}
-    for row in sig_result.scalars().all():
-        latest_signal.setdefault(row.ticker, row)
-
-    return {
-        "tickers": [
-            {
-                "ticker": t,
-                "price": latest_price.get(t),
-                "signal": (
-                    {
-                        "action": latest_signal[t].action,
-                        "confidence": latest_signal[t].confidence,
-                        "timestamp": latest_signal[t].timestamp.isoformat(),
-                    }
-                    if t in latest_signal
-                    else None
-                ),
-            }
-            for t in tickers
-        ]
-    }
+    return {"tickers": await get_summary_rows(db)}
 
 
 @router.post("/")

@@ -456,6 +456,41 @@ describe("Dashboard", () => {
     expect(screen.getByText(/Strong uptrend with confirming volume/i)).toBeInTheDocument();
   });
 
+  it("shows the 5-minute forecast as unavailable when the backend has no model/data for it", async () => {
+    mockFetchSequence({
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      // deliberately no /api/forecast/ handler — mockFetchSequence rejects
+      // unmocked URLs, and ForecastPanel should fail soft into "unavailable"
+    });
+
+    render(<Dashboard />);
+
+    expect(await screen.findByText(/Forecast unavailable for SPY/i)).toBeInTheDocument();
+  });
+
+  it("renders a successful 5-minute forecast", async () => {
+    mockFetchSequence({
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/forecast/SPY": () =>
+        jsonResponse({
+          ticker: "SPY",
+          direction: "up",
+          probability_up: 0.634,
+          confidence: 26.8,
+          horizon_minutes: 5,
+          as_of: "2026-08-30T12:00:00",
+        }),
+    });
+
+    render(<Dashboard />);
+
+    expect(await screen.findByText("▲ UP")).toBeInTheDocument();
+    expect(screen.getByText(/26\.8% confidence/i)).toBeInTheDocument();
+    expect(screen.getByText(/P\(up\) 63\.4%/i)).toBeInTheDocument();
+  });
+
   it("links each news article to its source URL", async () => {
     mockFetchSequence({
       "/ohlcv": () => jsonResponse(OHLCV_BODY),

@@ -362,7 +362,7 @@ export default function Dashboard() {
         </div>
 
         {/* Signal Card */}
-        <div>
+        <div className="flex flex-col gap-4">
           {pipelineResult ? (
             <SignalCard signal={pipelineResult.signal} />
           ) : signals.length > 0 ? (
@@ -388,6 +388,7 @@ export default function Dashboard() {
               <p className="text-sm">Click "Run Analysis Pipeline" to generate</p>
             </div>
           )}
+          <ForecastPanel ticker={ticker} />
         </div>
       </div>
 
@@ -1132,6 +1133,68 @@ function PriceChartPanel({ ticker }: { ticker: string }) {
           Volume
         </span>
       </div>
+    </div>
+  );
+}
+
+interface ForecastResult {
+  ticker: string;
+  direction: "up" | "down";
+  probability_up: number;
+  confidence: number;
+  horizon_minutes: number;
+  as_of: string;
+}
+
+// A separate, much-shorter-horizon call from the BUY/SELL/HOLD signal
+// above (5 minutes vs. 2-4 weeks) — a pattern-based probability lean
+// from recent minute bars, not a prediction. Fails soft: most tickers
+// won't have minute data or a trained model yet, and that's an expected,
+// quiet state here, not an error banner.
+function ForecastPanel({ ticker }: { ticker: string }) {
+  const [forecast, setForecast] = useState<ForecastResult | null>(null);
+  const [status, setStatus] = useState<"loading" | "ok" | "unavailable">("loading");
+
+  useEffect(() => {
+    setStatus("loading");
+    setForecast(null);
+    fetch(`${API}/api/forecast/${ticker}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d) {
+          setForecast(d);
+          setStatus("ok");
+        } else {
+          setStatus("unavailable");
+        }
+      })
+      .catch(() => setStatus("unavailable"));
+  }, [ticker]);
+
+  if (status === "loading") return null;
+
+  if (status === "unavailable" || !forecast) {
+    return (
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-5 text-sm text-[var(--text-muted)]">
+        <h2 className="text-sm font-medium text-[var(--text-muted)] mb-1">Next 5 Minutes</h2>
+        Forecast unavailable for {ticker} — needs synced minute data and a trained model.
+      </div>
+    );
+  }
+
+  const up = forecast.direction === "up";
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-5">
+      <h2 className="text-sm font-medium text-[var(--text-muted)] mb-2">Next 5 Minutes</h2>
+      <div className="flex items-center gap-2 mb-1">
+        <span className={`text-2xl font-bold ${up ? "text-[var(--green)]" : "text-[var(--red)]"}`}>
+          {up ? "▲ UP" : "▼ DOWN"}
+        </span>
+        <span className="text-sm text-[var(--text-muted)]">{forecast.confidence}% confidence</span>
+      </div>
+      <p className="text-xs text-[var(--text-muted)]">
+        P(up) {(forecast.probability_up * 100).toFixed(1)}% — pattern-based estimate, not financial advice
+      </p>
     </div>
   );
 }

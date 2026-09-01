@@ -14,8 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from database import init_db, async_session
 from models import OHLCV, Watchlist
 from mock_data import generate_daily_ohlcv
-from routers import stocks, signals, watchlist, pipeline
-from services.bulk_pipeline import run_all as run_pipeline_for_all_watchlist_tickers
+from routers import stocks, signals, watchlist, pipeline, forecast, subscribers
+from services.daily_digest import send_daily_digest
 
 scheduler = AsyncIOScheduler()
 
@@ -23,16 +23,19 @@ scheduler = AsyncIOScheduler()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """On startup: create tables, seed mock data if DB is empty, and start
-    the daily watchlist-wide pipeline refresh (also triggerable on demand
-    via POST /api/pipeline/run-all — both share services/bulk_pipeline.py's
-    run_all(), which guards against the two overlapping)."""
+    the daily pre-market job (services/daily_digest.py): sync OHLCV, run
+    the pipeline for the whole watchlist (also triggerable on demand via
+    POST /api/pipeline/run-all — both share services/bulk_pipeline.py's
+    run_all(), which guards against the two overlapping), then email the
+    resulting digest to every active subscriber. One comprehensive daily
+    run instead of a bare signal-refresh, timed to land 5 minutes before
+    the US market opens."""
     await init_db()
     await seed_mock_data()
     scheduler.add_job(
-        run_pipeline_for_all_watchlist_tickers,
-        CronTrigger(hour=21, minute=0),  # ~4-5pm US/Eastern, after market close
-        kwargs={"trigger": "scheduled"},
-        id="daily_pipeline_refresh",
+        send_daily_digest,
+        CronTrigger(hour=6, minute=25, timezone="America/Los_Angeles"),
+        id="daily_digest",
         misfire_grace_time=3600,
     )
     scheduler.start()
@@ -60,6 +63,8 @@ app.include_router(stocks.router)
 app.include_router(signals.router)
 app.include_router(watchlist.router)
 app.include_router(pipeline.router)
+app.include_router(forecast.router)
+app.include_router(subscribers.router)
 
 
 @app.get("/")
@@ -78,6 +83,10 @@ async def root():
             "GET  /api/watchlist/",
             "GET  /api/watchlist/summary",
             "POST /api/watchlist/",
+            "GET  /api/forecast/{ticker}",
+            "GET  /api/subscribers/",
+            "POST /api/subscribers/",
+            "GET  /api/subscribers/unsubscribe/{token}",
         ],
     }
 

@@ -32,7 +32,7 @@ async def test_sync_first_time_fetches_full_window(client, monkeypatch):
         assert days == 730  # no prior data — bootstrap uses the full default window
         return fake_bars(ticker, n=3, interval=interval)
 
-    monkeypatch.setattr("routers.stocks.fetch_ohlcv", fake_fetch)
+    monkeypatch.setattr("services.ohlcv_sync.fetch_ohlcv", fake_fetch)
 
     resp = await client.post("/api/stocks/SPY/sync")
     assert resp.status_code == 200
@@ -60,7 +60,7 @@ async def test_sync_incremental_preserves_older_history(client, session_factory,
         captured["days"] = days
         return fresh
 
-    monkeypatch.setattr("routers.stocks.fetch_ohlcv", fake_fetch)
+    monkeypatch.setattr("services.ohlcv_sync.fetch_ohlcv", fake_fetch)
 
     # A short display range pill must not shrink the fetch window or
     # wipe older history.
@@ -91,7 +91,7 @@ async def test_sync_incremental_ignores_days_param_for_bootstrap_window(client, 
         assert days <= 10
         return fake_bars("SPY", n=1, interval=interval)
 
-    monkeypatch.setattr("routers.stocks.fetch_ohlcv", fake_fetch)
+    monkeypatch.setattr("services.ohlcv_sync.fetch_ohlcv", fake_fetch)
 
     resp = await client.post("/api/stocks/SPY/sync?days=400")
     assert resp.status_code == 200
@@ -105,7 +105,7 @@ async def test_sync_minute_data_does_not_touch_daily_bars(client, session_factor
     async def fake_fetch(ticker, interval="daily", days=730):
         return fake_bars(ticker, n=10, interval=interval)
 
-    monkeypatch.setattr("routers.stocks.fetch_ohlcv", fake_fetch)
+    monkeypatch.setattr("services.ohlcv_sync.fetch_ohlcv", fake_fetch)
 
     resp = await client.post("/api/stocks/SPY/sync?interval=minute")
     assert resp.status_code == 200
@@ -129,7 +129,7 @@ async def test_sync_returns_502_on_provider_error(client, monkeypatch):
     async def fake_fetch(ticker, interval="daily", days=730):
         raise PolygonError("boom")
 
-    monkeypatch.setattr("routers.stocks.fetch_ohlcv", fake_fetch)
+    monkeypatch.setattr("services.ohlcv_sync.fetch_ohlcv", fake_fetch)
 
     resp = await client.post("/api/stocks/SPY/sync")
     assert resp.status_code == 502
@@ -140,7 +140,7 @@ async def test_sync_returns_502_when_no_data_returned(client, monkeypatch):
     async def fake_fetch(ticker, interval="daily", days=730):
         return []
 
-    monkeypatch.setattr("routers.stocks.fetch_ohlcv", fake_fetch)
+    monkeypatch.setattr("services.ohlcv_sync.fetch_ohlcv", fake_fetch)
 
     resp = await client.post("/api/stocks/SPY/sync")
     assert resp.status_code == 502

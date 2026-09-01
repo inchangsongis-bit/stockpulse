@@ -27,3 +27,7 @@ yarn-error.log*
 *.db
 *.sqlite
 *.sqlite3
+
+# Trained ML model artifacts (regenerate via scripts/train_forecast_model.py)
+backend/ml/*.joblib
+backend/ml/*.json
