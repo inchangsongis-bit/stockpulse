@@ -463,6 +463,7 @@ function WatchlistBar({
 }
 
 type ChartInterval = "daily" | "minute";
+type ChartType = "area" | "candlestick";
 
 interface RangeOption {
   label: string;
@@ -489,6 +490,7 @@ function toUnixSeconds(iso: string): UTCTimestamp {
 
 function PriceChartPanel({ ticker }: { ticker: string }) {
   const [interval, setInterval_] = useState<ChartInterval>("daily");
+  const [chartType, setChartType] = useState<ChartType>("area");
   const [days, setDays] = useState(365);
   const [bars, setBars] = useState<OHLCVBar[]>([]);
   const [loading, setLoading] = useState(false);
@@ -500,6 +502,7 @@ function PriceChartPanel({ ticker }: { ticker: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const areaSeriesRef = useRef<ISeriesApi<"Area"> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const barsRef = useRef<OHLCVBar[]>([]);
 
@@ -546,72 +549,85 @@ function PriceChartPanel({ ticker }: { ticker: string }) {
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: "#1a1a2e" },
       timeScale: { borderColor: "#1a1a2e" },
-    });
-
-    const candleSeries = chart.addCandlestickSeries({
-      upColor: "#22c55e",
-      downColor: "#ef4444",
-      borderUpColor: "#22c55e",
-      borderDownColor: "#ef4444",
-      wickUpColor: "#22c55e",
-      wickDownColor: "#ef4444",
+      // Robinhood-style: a one-finger drag scrubs the crosshair instead of
+      // panning the chart (pinch-to-zoom is unaffected — that's handleScale,
+      // not handleScroll).
+      handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: false, vertTouchDrag: false },
     });
 
     // Overlay histogram on its own (invisible) price scale so it shares
-    // the chart without competing with the candlestick price axis.
+    // the chart without competing with the price series' own axis.
     const volumeSeries = chart.addHistogramSeries({
       priceFormat: { type: "volume" },
       priceScaleId: "",
     });
     volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
 
+    // Series-type-agnostic: look the hovered bar up from our own data by
+    // timestamp rather than reading it back out of the series (whose shape
+    // differs between candlestick and area), so this doesn't need to know
+    // which price series is currently active.
     chart.subscribeCrosshairMove((param) => {
-      const candle = param.seriesData.get(candleSeries) as
-        | { time: UTCTimestamp; open: number; high: number; low: number; close: number }
-        | undefined;
-      if (!param.time || !candle) {
-        // Cursor left the chart — fall back to showing the latest bar.
-        const latest = barsRef.current;
+      const latest = barsRef.current;
+      if (!param.time) {
         setHover(latest.length > 0 ? latest[latest.length - 1] : null);
         return;
       }
-      const vol = param.seriesData.get(volumeSeries) as { value: number } | undefined;
-      setHover({
-        timestamp: new Date((candle.time as number) * 1000).toISOString(),
-        open: candle.open,
-        high: candle.high,
-        low: candle.low,
-        close: candle.close,
-        volume: vol?.value ?? 0,
-      });
+      const match = latest.find((b) => toUnixSeconds(b.timestamp) === param.time);
+      setHover(match ?? (latest.length > 0 ? latest[latest.length - 1] : null));
     });
 
     chartRef.current = chart;
-    candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
 
     return () => {
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
+      areaSeriesRef.current = null;
       volumeSeriesRef.current = null;
     };
   }, []);
 
-  // Push fresh data into the chart whenever bars/interval change
+  // Create/replace the price series whenever the chart type toggles —
+  // candlestick and area series have incompatible data shapes, so this
+  // can't just be a restyle of one persistent series.
+  useEffect(() => {
+    if (!chartRef.current) return;
+
+    let series: ISeriesApi<"Area"> | ISeriesApi<"Candlestick">;
+    if (chartType === "area") {
+      series = chartRef.current.addAreaSeries({
+        lineColor: "#22c55e",
+        topColor: "rgba(34,197,94,0.28)",
+        bottomColor: "rgba(34,197,94,0)",
+        lineWidth: 2,
+      });
+      areaSeriesRef.current = series;
+      candleSeriesRef.current = null;
+    } else {
+      series = chartRef.current.addCandlestickSeries({
+        upColor: "#22c55e",
+        downColor: "#ef4444",
+        borderUpColor: "#22c55e",
+        borderDownColor: "#ef4444",
+        wickUpColor: "#22c55e",
+        wickDownColor: "#ef4444",
+      });
+      candleSeriesRef.current = series;
+      areaSeriesRef.current = null;
+    }
+
+    return () => {
+      chartRef.current?.removeSeries(series);
+    };
+  }, [chartType]);
+
+  // Push fresh data into the chart whenever bars/interval/chartType change
   useEffect(() => {
     barsRef.current = bars;
-    if (!candleSeriesRef.current || !volumeSeriesRef.current || !chartRef.current) return;
+    if (!volumeSeriesRef.current || !chartRef.current) return;
 
-    candleSeriesRef.current.setData(
-      bars.map((b) => ({
-        time: toUnixSeconds(b.timestamp),
-        open: b.open,
-        high: b.high,
-        low: b.low,
-        close: b.close,
-      }))
-    );
     volumeSeriesRef.current.setData(
       bars.map((b) => ({
         time: toUnixSeconds(b.timestamp),
@@ -619,13 +635,38 @@ function PriceChartPanel({ ticker }: { ticker: string }) {
         color: b.close >= b.open ? "rgba(34,197,94,0.4)" : "rgba(239,68,68,0.4)",
       }))
     );
+
+    if (chartType === "candlestick" && candleSeriesRef.current) {
+      candleSeriesRef.current.setData(
+        bars.map((b) => ({
+          time: toUnixSeconds(b.timestamp),
+          open: b.open,
+          high: b.high,
+          low: b.low,
+          close: b.close,
+        }))
+      );
+    } else if (chartType === "area" && areaSeriesRef.current) {
+      // Robinhood colors the whole line/fill by whether price is up or
+      // down over the currently-loaded range, not per-bar.
+      const up = bars.length === 0 || bars[bars.length - 1].close >= bars[0].open;
+      areaSeriesRef.current.applyOptions({
+        lineColor: up ? "#22c55e" : "#ef4444",
+        topColor: up ? "rgba(34,197,94,0.28)" : "rgba(239,68,68,0.28)",
+        bottomColor: up ? "rgba(34,197,94,0)" : "rgba(239,68,68,0)",
+      });
+      areaSeriesRef.current.setData(
+        bars.map((b) => ({ time: toUnixSeconds(b.timestamp), value: b.close }))
+      );
+    }
+
     chartRef.current.applyOptions({
       timeScale: { timeVisible: interval === "minute", secondsVisible: false },
     });
     chartRef.current.timeScale().fitContent();
 
     setHover(bars.length > 0 ? bars[bars.length - 1] : null);
-  }, [bars, interval]);
+  }, [bars, interval, chartType]);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -649,14 +690,38 @@ function PriceChartPanel({ ticker }: { ticker: string }) {
     }
   };
 
+  // Per-bar change (this bar's own move), used in the detailed OHLC row.
   const change = hover ? hover.close - hover.open : 0;
   const changePct = hover && hover.open ? (change / hover.open) * 100 : 0;
 
+  // Change since the start of the currently-loaded range, used for the
+  // big Robinhood-style header price (updates live as the crosshair moves).
+  const periodOpen = bars.length > 0 ? bars[0].open : null;
+  const periodChange = hover && periodOpen != null ? hover.close - periodOpen : 0;
+  const periodChangePct = periodOpen ? (periodChange / periodOpen) * 100 : 0;
+
   return (
     <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4">
-      {/* Header row: title + filters */}
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-        <h2 className="text-sm font-medium text-[var(--text-muted)]">Price Chart</h2>
+      {/* Header row: big price + filters */}
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+        <div>
+          <h2 className="text-xs font-medium text-[var(--text-muted)] mb-1">{ticker} · Price Chart</h2>
+          {hover && (
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <span className="text-3xl font-semibold text-[var(--text)] tabular-nums">
+                ${hover.close.toFixed(2)}
+              </span>
+              <span
+                className={`text-sm font-medium tabular-nums ${
+                  periodChange >= 0 ? "text-[var(--green)]" : "text-[var(--red)]"
+                }`}
+              >
+                {periodChange >= 0 ? "+" : ""}
+                {periodChange.toFixed(2)} ({periodChangePct.toFixed(2)}%)
+              </span>
+            </div>
+          )}
+        </div>
 
         <div className="flex flex-wrap items-center gap-2">
           {/* Interval toggle */}
@@ -672,6 +737,23 @@ function PriceChartPanel({ ticker }: { ticker: string }) {
                 }`}
               >
                 {iv === "daily" ? "Daily" : "1-Minute"}
+              </button>
+            ))}
+          </div>
+
+          {/* Chart type toggle */}
+          <div className="flex rounded-lg border border-[var(--border)] overflow-hidden">
+            {(["area", "candlestick"] as const).map((ct) => (
+              <button
+                key={ct}
+                onClick={() => setChartType(ct)}
+                className={`px-3 py-1 text-xs font-medium transition-colors ${
+                  chartType === ct
+                    ? "bg-[var(--blue)] text-white"
+                    : "bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-[var(--text)]"
+                }`}
+              >
+                {ct === "area" ? "Line" : "Candles"}
               </button>
             ))}
           </div>

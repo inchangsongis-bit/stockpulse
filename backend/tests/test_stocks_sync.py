@@ -27,10 +27,9 @@ def fake_bars(ticker="SPY", n=3, interval="daily"):
 
 
 @pytest.mark.asyncio
-async def test_sync_replaces_existing_bars_with_live_data(client, session_factory, monkeypatch):
-    await seed_bars(session_factory, ticker="SPY", n=5)  # stale/mock data already in DB
-
+async def test_sync_first_time_fetches_full_window(client, monkeypatch):
     async def fake_fetch(ticker, interval="daily", days=730):
+        assert days == 730  # no prior data — bootstrap uses the full default window
         return fake_bars(ticker, n=3, interval=interval)
 
     monkeypatch.setattr("routers.stocks.fetch_ohlcv", fake_fetch)
@@ -40,12 +39,63 @@ async def test_sync_replaces_existing_bars_with_live_data(client, session_factor
     body = resp.json()
     assert body["ticker"] == "SPY"
     assert body["interval"] == "daily"
+    assert body["mode"] == "full"
     assert body["synced_bars"] == 3
     assert body["latest_close"] == pytest.approx(102.5)
 
-    # Old rows should be gone, replaced entirely by the 3 fresh bars
     ohlcv_resp = await client.get("/api/stocks/SPY/ohlcv?days=30")
     assert ohlcv_resp.json()["count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_sync_incremental_preserves_older_history(client, session_factory, monkeypatch):
+    # Bars already stored from 30 days ago through today — a ticker
+    # that's been synced before.
+    await seed_bars(session_factory, ticker="SPY", n=31, start_days_ago=30)
+
+    fresh = fake_bars("SPY", n=3, interval="daily")  # spans ~now-3..now-1
+    captured = {}
+
+    async def fake_fetch(ticker, interval="daily", days=730):
+        captured["days"] = days
+        return fresh
+
+    monkeypatch.setattr("routers.stocks.fetch_ohlcv", fake_fetch)
+
+    # A short display range pill must not shrink the fetch window or
+    # wipe older history.
+    resp = await client.post("/api/stocks/SPY/sync?days=30")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "incremental"
+    assert body["synced_bars"] == 3
+
+    # The incremental fetch window should be small (near the overlap
+    # buffer for daily bars), not the full 730-day default.
+    assert captured["days"] <= 10
+
+    ohlcv_resp = await client.get("/api/stocks/SPY/ohlcv?days=60")
+    data = ohlcv_resp.json()["data"]
+    # The oldest seeded bar (well before the fetch/overlap window) must
+    # have survived the sync untouched.
+    assert any(d["close"] == pytest.approx(100.5) for d in data)
+
+
+@pytest.mark.asyncio
+async def test_sync_incremental_ignores_days_param_for_bootstrap_window(client, session_factory, monkeypatch):
+    await seed_bars(session_factory, ticker="SPY", n=2, start_days_ago=1)
+
+    async def fake_fetch(ticker, interval="daily", days=730):
+        # days must be 400 for a first-ever sync to actually be a bug —
+        # here it should stay small since a bar already exists.
+        assert days <= 10
+        return fake_bars("SPY", n=1, interval=interval)
+
+    monkeypatch.setattr("routers.stocks.fetch_ohlcv", fake_fetch)
+
+    resp = await client.post("/api/stocks/SPY/sync?days=400")
+    assert resp.status_code == 200
+    assert resp.json()["mode"] == "incremental"
 
 
 @pytest.mark.asyncio

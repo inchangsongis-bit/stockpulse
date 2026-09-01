@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, delete
+from sqlalchemy import select, desc, delete, func
 from datetime import datetime, timedelta
 from typing import Optional
 from database import get_db
@@ -59,6 +59,12 @@ _SYNC_LIMITS = {
     "minute": {"default_days": 5, "max_days": 30},
 }
 
+# When a ticker+interval already has stored bars, sync only fetches from
+# the last stored bar forward instead of the full window — but with this
+# much overlap, to pick up any late-arriving/corrected bars Polygon may
+# still be revising for the most recent trading session(s).
+_SYNC_OVERLAP_DAYS = {"daily": 5, "minute": 1}
+
 
 @router.post("/{ticker}/sync")
 async def sync_ohlcv(
@@ -67,25 +73,57 @@ async def sync_ohlcv(
     days: Optional[int] = Query(default=None, ge=1),
     db: AsyncSession = Depends(get_db),
 ):
-    """Replace stored OHLCV history for a ticker with real data from Polygon."""
+    """
+    Sync OHLCV history for a ticker from Polygon.
+
+    First sync for a ticker+interval fetches and stores the full `days`
+    window (or the default). Every sync after that is incremental: it
+    fetches only from the last stored bar forward (plus a small overlap
+    to catch corrections to recent bars) and replaces just that
+    overlapping tail — `days` is ignored once a ticker has history, so
+    syncing while viewing a short range pill (e.g. "1M") can no longer
+    wipe out years of previously-synced data.
+    """
     ticker = ticker.upper()
     limits = _SYNC_LIMITS[interval]
-    days = days if days is not None else limits["default_days"]
-    if days > limits["max_days"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"days must be <= {limits['max_days']} for interval={interval}",
-        )
+
+    latest_result = await db.execute(
+        select(func.max(OHLCV.timestamp)).where(OHLCV.ticker == ticker, OHLCV.interval == interval)
+    )
+    latest_ts = latest_result.scalar_one_or_none()
+
+    if latest_ts is None:
+        fetch_days = days if days is not None else limits["default_days"]
+        if fetch_days > limits["max_days"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"days must be <= {limits['max_days']} for interval={interval}",
+            )
+    else:
+        overlap = _SYNC_OVERLAP_DAYS[interval]
+        since_days = (datetime.now() - latest_ts).days + overlap
+        fetch_days = max(overlap, min(since_days, limits["max_days"]))
 
     try:
-        bars = await fetch_ohlcv(ticker, interval=interval, days=days)
+        bars = await fetch_ohlcv(ticker, interval=interval, days=fetch_days)
     except PolygonError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
     if not bars:
         raise HTTPException(status_code=502, detail=f"Polygon returned no data for {ticker}")
 
-    await db.execute(delete(OHLCV).where(OHLCV.ticker == ticker, OHLCV.interval == interval))
+    if latest_ts is None:
+        await db.execute(delete(OHLCV).where(OHLCV.ticker == ticker, OHLCV.interval == interval))
+    else:
+        # Only clear the overlapping tail we just re-fetched — older,
+        # untouched history is never wiped by a sync.
+        await db.execute(
+            delete(OHLCV).where(
+                OHLCV.ticker == ticker,
+                OHLCV.interval == interval,
+                OHLCV.timestamp >= bars[0]["timestamp"],
+            )
+        )
     for bar in bars:
         db.add(OHLCV(**bar))
     await db.commit()
@@ -93,6 +131,7 @@ async def sync_ohlcv(
     return {
         "ticker": ticker,
         "interval": interval,
+        "mode": "full" if latest_ts is None else "incremental",
         "synced_bars": len(bars),
         "range": {
             "start": bars[0]["timestamp"].isoformat(),

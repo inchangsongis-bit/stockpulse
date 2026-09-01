@@ -8,11 +8,14 @@ import Dashboard from "./page";
 jest.mock("lightweight-charts", () => {
   const fakeSeries = () => ({
     setData: jest.fn(),
+    applyOptions: jest.fn(),
     priceScale: jest.fn(() => ({ applyOptions: jest.fn() })),
   });
   const fakeChart = {
     addCandlestickSeries: jest.fn(fakeSeries),
+    addAreaSeries: jest.fn(fakeSeries),
     addHistogramSeries: jest.fn(fakeSeries),
+    removeSeries: jest.fn(),
     subscribeCrosshairMove: jest.fn(),
     applyOptions: jest.fn(),
     timeScale: jest.fn(() => ({ fitContent: jest.fn() })),
@@ -137,7 +140,7 @@ describe("Dashboard", () => {
 
     render(<Dashboard />);
 
-    expect(await screen.findByText("$345.11")).toBeInTheDocument();
+    expect(await screen.findAllByText("$345.11")).not.toHaveLength(0);
     expect(screen.getByText(/No signals yet/i)).toBeInTheDocument();
   });
 
@@ -162,10 +165,10 @@ describe("Dashboard", () => {
     const user = userEvent.setup();
     render(<Dashboard />);
 
-    expect(await screen.findByText("$345.11")).toBeInTheDocument();
+    expect(await screen.findAllByText("$345.11")).not.toHaveLength(0);
     await user.click(await screen.findByRole("button", { name: "AAPL" }));
 
-    expect(await screen.findByText("$185.00")).toBeInTheDocument();
+    expect(await screen.findAllByText("$185.00")).not.toHaveLength(0);
   });
 
   it("clears a stale sync confirmation message when switching tickers", async () => {
@@ -191,13 +194,13 @@ describe("Dashboard", () => {
     const user = userEvent.setup();
     render(<Dashboard />);
 
-    await screen.findByText("$345.11");
+    await screen.findAllByText("$345.11");
     await user.click(screen.getByRole("button", { name: "Sync Live Data" }));
 
     expect(await screen.findByText(/Synced 251 bars/i)).toBeInTheDocument();
 
     await user.click(await screen.findByRole("button", { name: "AAPL" }));
-    await screen.findByText("$185.00");
+    await screen.findAllByText("$185.00");
 
     expect(screen.queryByText(/Synced 251 bars/i)).not.toBeInTheDocument();
   });
@@ -223,9 +226,9 @@ describe("Dashboard", () => {
 
     const user = userEvent.setup();
     const { unmount } = render(<Dashboard />);
-    await screen.findByText("$345.11");
+    await screen.findAllByText("$345.11");
     await user.click(await screen.findByRole("button", { name: "AAPL" }));
-    await screen.findByText("$185.00");
+    await screen.findAllByText("$185.00");
     unmount();
 
     // A fresh mount reads the persisted ticker from localStorage — this is
@@ -234,7 +237,7 @@ describe("Dashboard", () => {
     mockFetchSequence(handlers);
     render(<Dashboard />);
 
-    expect(await screen.findByText("$185.00")).toBeInTheDocument();
+    expect(await screen.findAllByText("$185.00")).not.toHaveLength(0);
   });
 
   it("adds a new ticker, auto-syncs real data for it, and switches to it", async () => {
@@ -261,7 +264,7 @@ describe("Dashboard", () => {
     const user = userEvent.setup();
     render(<Dashboard />);
 
-    await screen.findByText("$345.11");
+    await screen.findAllByText("$345.11");
     await user.type(screen.getByPlaceholderText("Add ticker"), "tsla");
     await user.click(screen.getByRole("button", { name: "+ Add" }));
 
@@ -289,7 +292,7 @@ describe("Dashboard", () => {
     const user = userEvent.setup();
     render(<Dashboard />);
 
-    await screen.findByText("$345.11");
+    await screen.findAllByText("$345.11");
     await user.type(screen.getByPlaceholderText("Add ticker"), "tsla");
     await user.click(screen.getByRole("button", { name: "+ Add" }));
 
@@ -307,7 +310,7 @@ describe("Dashboard", () => {
 
     render(<Dashboard />);
 
-    await screen.findByText("$345.11");
+    await screen.findAllByText("$345.11");
     expect(screen.queryByRole("button", { name: /remove spy/i })).not.toBeInTheDocument();
   });
 
@@ -367,7 +370,7 @@ describe("Dashboard", () => {
     const user = userEvent.setup();
     render(<Dashboard />);
 
-    await screen.findByText("$345.11");
+    await screen.findAllByText("$345.11");
     await user.click(screen.getByRole("button", { name: /run analysis pipeline/i }));
 
     expect(await screen.findByText("BUY")).toBeInTheDocument();
@@ -384,7 +387,7 @@ describe("Dashboard", () => {
     const user = userEvent.setup();
     render(<Dashboard />);
 
-    await screen.findByText("$345.11");
+    await screen.findAllByText("$345.11");
     await user.click(screen.getByRole("button", { name: /run analysis pipeline/i }));
     await screen.findByText("BUY");
 
@@ -410,7 +413,7 @@ describe("Dashboard", () => {
     const user = userEvent.setup();
     render(<Dashboard />);
 
-    await screen.findByText("$345.11");
+    await screen.findAllByText("$345.11");
     await user.click(screen.getByRole("button", { name: /run analysis pipeline/i }));
 
     expect(await screen.findByText(/Pipeline failed \(500\)/i)).toBeInTheDocument();
@@ -429,7 +432,7 @@ describe("Dashboard", () => {
     const user = userEvent.setup();
     render(<Dashboard />);
 
-    await screen.findByText("$345.11");
+    await screen.findAllByText("$345.11");
     await user.click(screen.getByRole("button", { name: /run analysis pipeline/i }));
 
     expect(await screen.findByText(/Is the backend running/i)).toBeInTheDocument();
