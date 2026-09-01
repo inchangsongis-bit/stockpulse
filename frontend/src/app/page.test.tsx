@@ -353,6 +353,46 @@ describe("Dashboard", () => {
     expect(screen.queryByRole("button", { name: "SPY" })).not.toBeInTheDocument();
   });
 
+  it("sorts the watchlist overview by ticker, price, and confidence", async () => {
+    mockFetchSequence({
+      "/api/watchlist/summary": () =>
+        jsonResponse({
+          tickers: [
+            { ticker: "ZETA", price: 50, signal: { action: "HOLD", confidence: 10, timestamp: "2026-08-30T00:00:00" } },
+            { ticker: "ALPHA", price: 200, signal: { action: "HOLD", confidence: 90, timestamp: "2026-08-30T00:00:00" } },
+            { ticker: "MID", price: 100, signal: { action: "HOLD", confidence: 50, timestamp: "2026-08-30T00:00:00" } },
+          ],
+        }),
+      "/ohlcv": () => jsonResponse(OHLCV_BODY),
+      "/api/signals/SPY": () => jsonResponse({ signals: [] }),
+      "/api/stocks/SPY/news": () => jsonResponse({ ticker: "SPY", count: 0, articles: [] }),
+    });
+
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    await screen.findAllByText("$345.11");
+    await screen.findByRole("button", { name: "ALPHA" });
+
+    const tickerOrder = () =>
+      screen
+        .getAllByRole("button")
+        .map((b) => b.textContent)
+        .filter((t): t is string => t === "ZETA" || t === "ALPHA" || t === "MID");
+
+    // Default sort: ticker ascending
+    expect(tickerOrder()).toEqual(["ALPHA", "MID", "ZETA"]);
+
+    await user.click(screen.getByRole("button", { name: "Sort by Price" }));
+    expect(tickerOrder()).toEqual(["ZETA", "MID", "ALPHA"]); // ascending price: 50, 100, 200
+
+    await user.click(screen.getByRole("button", { name: "Sort by Price" }));
+    expect(tickerOrder()).toEqual(["ALPHA", "MID", "ZETA"]); // descending price: 200, 100, 50
+
+    await user.click(screen.getByRole("button", { name: "Sort by Confidence" }));
+    expect(tickerOrder()).toEqual(["ZETA", "MID", "ALPHA"]); // ascending confidence: 10, 50, 90
+    expect(screen.queryByRole("button", { name: "SPY" })).not.toBeInTheDocument();
+  });
+
   it("renders persisted news history independent of running the pipeline", async () => {
     mockFetchSequence({
       "/ohlcv": () => jsonResponse(OHLCV_BODY),

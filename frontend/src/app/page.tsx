@@ -539,6 +539,55 @@ function TickerSearchBox({
 }
 
 type SignalFilter = "all" | "BUY" | "SELL" | "HOLD" | "none";
+type SortKey = "ticker" | "price" | "confidence";
+
+function sortValue(entry: WatchlistSummaryEntry, key: SortKey): string | number | null {
+  if (key === "ticker") return entry.ticker;
+  if (key === "price") return entry.price;
+  return entry.signal?.confidence ?? null;
+}
+
+// Nulls (no price yet / not analyzed yet) always sort to the end,
+// regardless of ascending vs. descending direction — flipping direction
+// should reorder the analyzed tickers, not shuffle the unanalyzed ones
+// to the top.
+function sortComparator(a: WatchlistSummaryEntry, b: WatchlistSummaryEntry, key: SortKey, dir: "asc" | "desc"): number {
+  const av = sortValue(a, key);
+  const bv = sortValue(b, key);
+  if (av == null && bv == null) return 0;
+  if (av == null) return 1;
+  if (bv == null) return -1;
+  const cmp = typeof av === "string" ? av.localeCompare(bv as string) : (av as number) - (bv as number);
+  return dir === "asc" ? cmp : -cmp;
+}
+
+function SortHeader({
+  label,
+  sortKey,
+  activeKey,
+  dir,
+  onClick,
+  className,
+}: {
+  label: string;
+  sortKey: SortKey;
+  activeKey: SortKey;
+  dir: "asc" | "desc";
+  onClick: (key: SortKey) => void;
+  className?: string;
+}) {
+  const active = sortKey === activeKey;
+  return (
+    <button
+      onClick={() => onClick(sortKey)}
+      aria-label={`Sort by ${label}`}
+      className={`text-left flex items-center gap-0.5 hover:text-[var(--text)] ${active ? "text-[var(--text)]" : ""} ${className || ""}`}
+    >
+      {label}
+      {active && <span className="text-[10px]">{dir === "asc" ? "▲" : "▼"}</span>}
+    </button>
+  );
+}
 
 // The BUY/SELL/HOLD grouped watchlist overview — segmented filter tabs
 // over a compact, scrollable list (see CLAUDE.md-style rationale: this
@@ -560,6 +609,8 @@ function SignalOverviewPanel({
   refreshStatus: RunAllStatus | null;
 }) {
   const [filter, setFilter] = useState<SignalFilter>("all");
+  const [sortKey, setSortKey] = useState<SortKey>("ticker");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   const counts = {
     all: summary.length,
@@ -575,6 +626,17 @@ function SignalOverviewPanel({
       : filter === "none"
       ? summary.filter((s) => !s.signal)
       : summary.filter((s) => s.signal?.action === filter);
+
+  const sorted = [...filtered].sort((a, b) => sortComparator(a, b, sortKey, sortDir));
+
+  const handleSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
 
   const refreshing = refreshStatus?.running ?? false;
 
@@ -619,11 +681,17 @@ function SignalOverviewPanel({
         ))}
       </div>
 
-      <div className="max-h-72 overflow-y-auto rounded-lg border border-[var(--border)] divide-y divide-[var(--border)]">
-        {filtered.length === 0 ? (
+      <div className="flex items-center gap-3 px-3 py-1.5 text-xs font-medium text-[var(--text-muted)] border-b border-[var(--border)]">
+        <SortHeader label="Ticker" sortKey="ticker" activeKey={sortKey} dir={sortDir} onClick={handleSort} className="w-16" />
+        <SortHeader label="Price" sortKey="price" activeKey={sortKey} dir={sortDir} onClick={handleSort} className="w-20" />
+        <SortHeader label="Confidence" sortKey="confidence" activeKey={sortKey} dir={sortDir} onClick={handleSort} className="flex-1" />
+      </div>
+
+      <div className="max-h-72 overflow-y-auto rounded-lg border border-t-0 border-[var(--border)] divide-y divide-[var(--border)]">
+        {sorted.length === 0 ? (
           <p className="p-4 text-sm text-[var(--text-muted)] text-center">No tickers in this category.</p>
         ) : (
-          filtered.map((s) => (
+          sorted.map((s) => (
             <div
               key={s.ticker}
               className={`flex items-center gap-3 px-3 py-2 text-sm transition-colors ${
