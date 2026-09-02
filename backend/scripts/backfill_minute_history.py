@@ -71,11 +71,16 @@ async def main(years: int, only_tickers):
         print("POLYGON_API_KEY is not configured.")
         return
 
-    async with async_session() as db:
-        result = await db.execute(select(Watchlist.ticker).order_by(Watchlist.ticker))
-        tickers = [r[0] for r in result.all()]
     if only_tickers:
-        tickers = [t for t in tickers if t in only_tickers]
+        # Explicitly named tickers are fetched as given, whether or not
+        # they're on the watchlist — this is also how reference series
+        # (VXX, TLT, UUP) get pulled for research without polluting the
+        # user's watchlist UI.
+        tickers = sorted(only_tickers)
+    else:
+        async with async_session() as db:
+            result = await db.execute(select(Watchlist.ticker).order_by(Watchlist.ticker))
+            tickers = [r[0] for r in result.all()]
 
     today = datetime.now().date()
     # Oldest first, so an interrupted run still leaves a contiguous block.
