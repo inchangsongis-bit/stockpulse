@@ -1,16 +1,14 @@
 """
-Pipeline router — triggers the full agent pipeline for a ticker.
+Pipeline router — triggers the full agent pipeline for a ticker, or for
+the whole watchlist at once.
 """
 
-import json
-from datetime import datetime
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from config import get_settings
+
 from database import get_db
-from models import OHLCV, Signal, NewsArticle
-from agents.orchestrator import PipelineOrchestrator
+from services.bulk_pipeline import get_status, run_all
+from services.pipeline_runner import run_pipeline_for_ticker
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
@@ -18,125 +16,27 @@ router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 @router.post("/run/{ticker}")
 async def run_pipeline(ticker: str, db: AsyncSession = Depends(get_db)):
     """Run the full analysis pipeline for a ticker."""
-    ticker = ticker.upper()
+    return await run_pipeline_for_ticker(ticker, db)
 
-    # Fetch daily OHLCV data from DB — indicators (SMA/RSI/etc.) assume
-    # one bar per day, so minute bars must be excluded here.
-    result = await db.execute(
-        select(OHLCV)
-        .where(OHLCV.ticker == ticker, OHLCV.interval == "daily")
-        .order_by(OHLCV.timestamp.asc())
-    )
-    rows = result.scalars().all()
 
-    ohlcv_data = [
-        {
-            "timestamp": r.timestamp,
-            "open": r.open,
-            "high": r.high,
-            "low": r.low,
-            "close": r.close,
-            "volume": r.volume,
-            "vwap": r.vwap,
-        }
-        for r in rows
-    ]
+@router.post("/run-all")
+async def run_pipeline_for_all(background_tasks: BackgroundTasks):
+    """
+    Kick off a background run of the full pipeline for every watchlist
+    ticker (the same "Refresh All" this session ran by hand as a bash loop
+    before this endpoint existed). Returns immediately — poll
+    GET /run-all/status for progress. No-ops (with status "already_running")
+    if a run, manual or scheduled, is already in flight.
+    """
+    status = get_status()
+    if status["running"]:
+        return {"status": "already_running", **status}
+    background_tasks.add_task(run_all, trigger="manual")
+    return {"status": "started"}
 
-    if not ohlcv_data:
-        return {"error": f"No OHLCV data for {ticker}. Seed the database first."}
 
-    # Use real news (Finnhub) when a key is configured, mock data otherwise.
-    use_mock = not bool(get_settings().finnhub_api_key)
-
-    # For live runs, avoid re-scoring articles we've already persisted a
-    # sentiment score for — the sentiment agent will skip Claude calls for
-    # any article whose URL is in this cache.
-    cached_sentiment = {}
-    if not use_mock:
-        cached_result = await db.execute(
-            select(NewsArticle).where(NewsArticle.ticker == ticker, NewsArticle.sentiment.isnot(None))
-        )
-        cached_sentiment = {
-            row.url: {
-                "title": row.title,
-                "source": row.source,
-                "url": row.url,
-                "sentiment": row.sentiment,
-                "source_credibility": row.source_credibility,
-                "expected_impact": row.expected_impact,
-                "reasoning": row.reasoning,
-            }
-            for row in cached_result.scalars().all()
-        }
-
-    # Run pipeline
-    orchestrator = PipelineOrchestrator()
-    pipeline_result = await orchestrator.run_pipeline(
-        ticker=ticker,
-        ohlcv_data=ohlcv_data,
-        use_mock=use_mock,
-        cached_sentiment=cached_sentiment,
-    )
-
-    # Save signal to DB
-    sig = pipeline_result["signal"]
-    db_signal = Signal(
-        ticker=ticker,
-        timestamp=datetime.now(),
-        action=sig["action"],
-        confidence=sig["confidence"],
-        reasoning=sig["reasoning"],
-        entry_low=sig["entry_low"],
-        entry_high=sig["entry_high"],
-        target=sig["target"],
-        stop_loss=sig["stop_loss"],
-        time_horizon=sig["time_horizon"],
-        risk_level=sig["risk_level"],
-        factors_json=json.dumps(sig["factors"]),
-    )
-    db.add(db_signal)
-    await db.commit()
-
-    # Persist real news + sentiment so future runs can reuse it (see
-    # cached_sentiment above). Mock runs stay fully ephemeral, matching
-    # today's behavior — no point accumulating fake "reuters.com/mock/..."
-    # rows.
-    if not use_mock:
-        articles = pipeline_result["research"]["articles"]
-        scores_by_title = {s["title"]: s for s in pipeline_result["sentiment_profile"]["article_scores"]}
-        urls = [a["url"] for a in articles if a.get("url")]
-        existing_by_url = {}
-        if urls:
-            existing_result = await db.execute(
-                select(NewsArticle).where(NewsArticle.ticker == ticker, NewsArticle.url.in_(urls))
-            )
-            existing_by_url = {row.url: row for row in existing_result.scalars().all()}
-
-        for a in articles:
-            row = existing_by_url.get(a.get("url"))
-            if row is None:
-                row = NewsArticle(ticker=ticker, url=a.get("url"))
-                db.add(row)
-            row.title = a["title"]
-            row.source = a["source"]
-            row.summary = a["summary"]
-            row.category = a["category"]
-            # news_researcher.py serializes published_at to an ISO string
-            # for the HTTP response; parse it back for the DateTime column.
-            published_at = a["published_at"]
-            row.published_at = (
-                datetime.fromisoformat(published_at) if isinstance(published_at, str) else published_at
-            )
-            row.relevance = a["relevance"]
-            row.external_id = a.get("external_id")
-            score = scores_by_title.get(a["title"])
-            if score:
-                row.sentiment = score["sentiment"]
-                row.source_credibility = score["source_credibility"]
-                row.expected_impact = score["expected_impact"]
-                row.reasoning = score["reasoning"]
-                row.sentiment_scored_at = datetime.now()
-
-        await db.commit()
-
-    return pipeline_result
+@router.get("/run-all/status")
+async def get_pipeline_run_all_status():
+    """Progress of the current or most recent 'Refresh All' run (manual or
+    scheduled)."""
+    return get_status()

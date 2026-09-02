@@ -93,3 +93,16 @@ class Signal(Base):
     time_horizon = Column(String(50))
     risk_level = Column(String(20))
     factors_json = Column(Text)  # JSON string
+
+
+class Subscriber(Base):
+    __tablename__ = "subscribers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email = Column(String(255), nullable=False, unique=True, index=True)
+    subscribed_at = Column(DateTime, server_default=func.now())
+    unsubscribed_at = Column(DateTime)
+    is_active = Column(Boolean, nullable=False, default=True, server_default="1")
+    # Unguessable token embedded in the email's one-click unsubscribe link
+    # so unsubscribing doesn't need an auth system this app doesn't have.
+    unsubscribe_token = Column(String(64), nullable=False, unique=True, index=True)

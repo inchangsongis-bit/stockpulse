@@ -4,6 +4,7 @@ from sqlalchemy import select, delete
 from pydantic import BaseModel
 from database import get_db
 from models import Watchlist
+from services.watchlist_summary import get_summary_rows
 
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
 
@@ -22,6 +23,16 @@ async def list_watchlist(db: AsyncSession = Depends(get_db)):
             for r in rows
         ]
     }
+
+
+@router.get("/summary")
+async def get_watchlist_summary(db: AsyncSession = Depends(get_db)):
+    """
+    Watchlist tickers with their latest price and latest signal in one
+    call — powers the BUY/SELL/HOLD grouped overview so the frontend
+    doesn't have to make 2 requests per ticker for a 50-ticker watchlist.
+    """
+    return {"tickers": await get_summary_rows(db)}
 
 
 @router.post("/")

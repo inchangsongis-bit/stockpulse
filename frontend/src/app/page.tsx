@@ -24,9 +24,19 @@ interface OHLCVBar {
   vwap?: number;
 }
 
-interface WatchlistEntry {
+interface WatchlistSummaryEntry {
   ticker: string;
-  added_at: string | null;
+  price: number | null;
+  signal: { action: string; confidence: number; timestamp: string } | null;
+}
+
+interface RunAllStatus {
+  running: boolean;
+  trigger: string | null;
+  total: number;
+  completed: number;
+  current_ticker: string | null;
+  errors: Record<string, string>;
 }
 
 interface Signal {
@@ -95,7 +105,7 @@ interface PipelineResult {
 
 export default function Dashboard() {
   const [ticker, setTicker] = useState("SPY");
-  const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
+  const [summary, setSummary] = useState<WatchlistSummaryEntry[]>([]);
   const [watchlistError, setWatchlistError] = useState<string | null>(null);
   const [addingTicker, setAddingTicker] = useState(false);
   const [ohlcv, setOhlcv] = useState<OHLCVBar[]>([]);
@@ -104,14 +114,61 @@ export default function Dashboard() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"signal" | "technical" | "news">("signal");
+  const [refreshAllStatus, setRefreshAllStatus] = useState<RunAllStatus | null>(null);
 
-  // Fetch watchlist once on mount
-  useEffect(() => {
-    fetch(`${API}/api/watchlist/`)
+  // Watchlist tickers + their latest price/signal, for the BUY/SELL/HOLD
+  // grouped overview — one call instead of 2 requests per ticker.
+  const fetchSummary = useCallback(() => {
+    return fetch(`${API}/api/watchlist/summary`)
       .then((r) => r.json())
-      .then((d) => setWatchlist(d.tickers || []))
+      .then((d) => setSummary(d.tickers || []))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    fetchSummary();
+  }, [fetchSummary]);
+
+  const refreshAll = useCallback(async () => {
+    try {
+      await fetch(`${API}/api/pipeline/run-all`, { method: "POST" });
+    } catch {
+      // The status poll below will simply keep showing "idle" — acceptable
+      // no-op if the backend is unreachable.
+    }
+  }, []);
+
+  // Poll run-all progress continuously (cheap local GET) so both a manual
+  // "Refresh All" click and the daily scheduled job (which runs with no
+  // user action) show up here the same way.
+  useEffect(() => {
+    let cancelled = false;
+    let wasRunning = false;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API}/api/pipeline/run-all/status`);
+        const data: RunAllStatus = await res.json();
+        if (cancelled) return;
+        setRefreshAllStatus(data);
+        if (data.running) {
+          wasRunning = true;
+        } else if (wasRunning) {
+          wasRunning = false;
+          fetchSummary(); // pick up newly-generated signals
+        }
+      } catch {
+        // ignore transient poll failures
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [fetchSummary]);
 
   // Restore the last-selected ticker after mount (client-only — reading
   // localStorage during the initial render would mismatch the server-
@@ -146,7 +203,7 @@ export default function Dashboard() {
         setWatchlistError(data.detail || `Could not add ${newTicker}.`);
         return;
       }
-      setWatchlist((w) => [...w, { ticker: data.ticker, added_at: new Date().toISOString() }]);
+      setSummary((s) => [...s, { ticker: data.ticker, price: null, signal: null }]);
 
       // Best-effort: pull real daily data so the ticker isn't empty by
       // default. If this fails (e.g. an invalid symbol upstream), the
@@ -176,8 +233,8 @@ export default function Dashboard() {
           setWatchlistError(data.detail || `Could not remove ${target}.`);
           return;
         }
-        const next = watchlist.filter((entry) => entry.ticker !== target);
-        setWatchlist(next);
+        const next = summary.filter((entry) => entry.ticker !== target);
+        setSummary(next);
         if (target === ticker && next.length > 0) {
           setTicker(next[0].ticker);
         }
@@ -185,7 +242,7 @@ export default function Dashboard() {
         setWatchlistError("Failed to remove ticker — is the backend running?");
       }
     },
-    [ticker, watchlist]
+    [ticker, summary]
   );
 
   // Fetch OHLCV data
@@ -264,14 +321,21 @@ export default function Dashboard() {
         </button>
       </div>
 
-      <WatchlistBar
-        watchlist={watchlist}
-        activeTicker={ticker}
+      <TickerSearchBox
+        tickers={summary.map((s) => s.ticker)}
         onSelect={setTicker}
         onAdd={addTicker}
-        onRemove={removeTicker}
-        error={watchlistError}
         adding={addingTicker}
+        error={watchlistError}
+      />
+
+      <SignalOverviewPanel
+        summary={summary}
+        activeTicker={ticker}
+        onSelect={setTicker}
+        onRemove={removeTicker}
+        onRefreshAll={refreshAll}
+        refreshStatus={refreshAllStatus}
       />
 
       {error && (
@@ -298,7 +362,7 @@ export default function Dashboard() {
         </div>
 
         {/* Signal Card */}
-        <div>
+        <div className="flex flex-col gap-4">
           {pipelineResult ? (
             <SignalCard signal={pipelineResult.signal} />
           ) : signals.length > 0 ? (
@@ -324,6 +388,7 @@ export default function Dashboard() {
               <p className="text-sm">Click "Run Analysis Pipeline" to generate</p>
             </div>
           )}
+          <ForecastPanel ticker={ticker} />
         </div>
       </div>
 
@@ -388,81 +453,292 @@ export default function Dashboard() {
 
 // ── Components ──
 
-function WatchlistBar({
-  watchlist,
-  activeTicker,
+// Compact search-or-add combobox — replaces the old row of ticker chips.
+// Typing filters the existing watchlist; if nothing matches exactly, an
+// "Add" option appears to add it as a new ticker.
+function TickerSearchBox({
+  tickers,
   onSelect,
   onAdd,
-  onRemove,
-  error,
   adding,
+  error,
 }: {
-  watchlist: WatchlistEntry[];
-  activeTicker: string;
+  tickers: string[];
   onSelect: (ticker: string) => void;
   onAdd: (ticker: string) => void;
-  onRemove: (ticker: string) => void;
-  error: string | null;
   adding: boolean;
+  error: string | null;
 }) {
   const [input, setInput] = useState("");
+  const [open, setOpen] = useState(false);
+
+  const query = input.trim().toUpperCase();
+  const matches = query ? tickers.filter((t) => t.includes(query)).slice(0, 8) : [];
+  const exactMatch = tickers.includes(query);
+
+  const handleSelect = (t: string) => {
+    onSelect(t);
+    setInput("");
+    setOpen(false);
+  };
 
   const handleAdd = () => {
-    const t = input.trim();
-    if (!t || adding) return;
-    onAdd(t);
+    if (!query || adding) return;
+    onAdd(query);
     setInput("");
+    setOpen(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== "Enter") return;
+    if (exactMatch) handleSelect(query);
+    else handleAdd();
   };
 
   return (
-    <div className="mb-4">
-      <div className="flex flex-wrap items-center gap-2">
-        {watchlist.map((w) => (
-          <div
-            key={w.ticker}
-            className={`flex items-center gap-1.5 pl-3 pr-1.5 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
-              w.ticker === activeTicker
-                ? "bg-[var(--blue)] text-white border-[var(--blue)]"
-                : "bg-[var(--bg-card)] text-[var(--text-muted)] border-[var(--border)] hover:text-[var(--text)]"
-            }`}
-          >
-            <button onClick={() => onSelect(w.ticker)}>{w.ticker}</button>
-            {watchlist.length > 1 && (
-              <button
-                onClick={() => onRemove(w.ticker)}
-                aria-label={`Remove ${w.ticker}`}
-                className={`w-4 h-4 flex items-center justify-center rounded-full text-xs leading-none ${
-                  w.ticker === activeTicker ? "hover:bg-white/20" : "hover:bg-[var(--bg-hover)]"
-                }`}
-              >
-                ×
-              </button>
-            )}
-          </div>
-        ))}
-
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value.toUpperCase())}
-          onKeyDown={(e) => e.key === "Enter" && handleAdd()}
-          placeholder="Add ticker"
-          disabled={adding}
-          className="w-24 px-2.5 py-1.5 rounded-lg text-sm bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--blue)] disabled:opacity-50"
-        />
-        <button
-          onClick={handleAdd}
-          disabled={adding}
-          className="px-3 py-1.5 rounded-lg text-sm font-medium bg-[var(--bg-hover)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)] disabled:opacity-50 disabled:cursor-wait"
-        >
-          {adding ? "Adding…" : "+ Add"}
-        </button>
-      </div>
+    <div className="relative mb-4 max-w-xs">
+      <input
+        value={input}
+        onChange={(e) => {
+          setInput(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onKeyDown={handleKeyDown}
+        placeholder="Search or add ticker"
+        disabled={adding}
+        className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--blue)] disabled:opacity-50"
+      />
+      {open && query && (matches.length > 0 || !exactMatch) && (
+        <div className="absolute z-10 mt-1 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-card)] shadow-lg overflow-hidden">
+          {matches.map((t) => (
+            <button
+              key={t}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => handleSelect(t)}
+              className="block w-full text-left px-3 py-2 text-sm text-[var(--text)] hover:bg-[var(--bg-hover)]"
+            >
+              {t}
+            </button>
+          ))}
+          {!exactMatch && (
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={handleAdd}
+              disabled={adding}
+              className="block w-full text-left px-3 py-2 text-sm text-[var(--blue)] hover:bg-[var(--bg-hover)] border-t border-[var(--border)] disabled:opacity-50"
+            >
+              {adding ? "Adding…" : `+ Add "${query}" to watchlist`}
+            </button>
+          )}
+        </div>
+      )}
       {error && <p className="text-xs text-[var(--red)] mt-1.5">{error}</p>}
     </div>
   );
 }
 
+type SignalFilter = "all" | "BUY" | "SELL" | "HOLD" | "none";
+type SortKey = "ticker" | "price" | "confidence";
+
+function sortValue(entry: WatchlistSummaryEntry, key: SortKey): string | number | null {
+  if (key === "ticker") return entry.ticker;
+  if (key === "price") return entry.price;
+  return entry.signal?.confidence ?? null;
+}
+
+// Nulls (no price yet / not analyzed yet) always sort to the end,
+// regardless of ascending vs. descending direction — flipping direction
+// should reorder the analyzed tickers, not shuffle the unanalyzed ones
+// to the top.
+function sortComparator(a: WatchlistSummaryEntry, b: WatchlistSummaryEntry, key: SortKey, dir: "asc" | "desc"): number {
+  const av = sortValue(a, key);
+  const bv = sortValue(b, key);
+  if (av == null && bv == null) return 0;
+  if (av == null) return 1;
+  if (bv == null) return -1;
+  const cmp = typeof av === "string" ? av.localeCompare(bv as string) : (av as number) - (bv as number);
+  return dir === "asc" ? cmp : -cmp;
+}
+
+function SortHeader({
+  label,
+  sortKey,
+  activeKey,
+  dir,
+  onClick,
+  className,
+}: {
+  label: string;
+  sortKey: SortKey;
+  activeKey: SortKey;
+  dir: "asc" | "desc";
+  onClick: (key: SortKey) => void;
+  className?: string;
+}) {
+  const active = sortKey === activeKey;
+  return (
+    <button
+      onClick={() => onClick(sortKey)}
+      aria-label={`Sort by ${label}`}
+      className={`text-left flex items-center gap-0.5 hover:text-[var(--text)] ${active ? "text-[var(--text)]" : ""} ${className || ""}`}
+    >
+      {label}
+      {active && <span className="text-[10px]">{dir === "asc" ? "▲" : "▼"}</span>}
+    </button>
+  );
+}
+
+// The BUY/SELL/HOLD grouped watchlist overview — segmented filter tabs
+// over a compact, scrollable list (see CLAUDE.md-style rationale: this
+// scales far better than a card grid or a chip row once the watchlist
+// has 50+ tickers).
+function SignalOverviewPanel({
+  summary,
+  activeTicker,
+  onSelect,
+  onRemove,
+  onRefreshAll,
+  refreshStatus,
+}: {
+  summary: WatchlistSummaryEntry[];
+  activeTicker: string;
+  onSelect: (ticker: string) => void;
+  onRemove: (ticker: string) => void;
+  onRefreshAll: () => void;
+  refreshStatus: RunAllStatus | null;
+}) {
+  const [filter, setFilter] = useState<SignalFilter>("all");
+  const [sortKey, setSortKey] = useState<SortKey>("ticker");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+
+  const counts = {
+    all: summary.length,
+    BUY: summary.filter((s) => s.signal?.action === "BUY").length,
+    SELL: summary.filter((s) => s.signal?.action === "SELL").length,
+    HOLD: summary.filter((s) => s.signal?.action === "HOLD").length,
+    none: summary.filter((s) => !s.signal).length,
+  };
+
+  const filtered =
+    filter === "all"
+      ? summary
+      : filter === "none"
+      ? summary.filter((s) => !s.signal)
+      : summary.filter((s) => s.signal?.action === filter);
+
+  const sorted = [...filtered].sort((a, b) => sortComparator(a, b, sortKey, sortDir));
+
+  const handleSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
+
+  const refreshing = refreshStatus?.running ?? false;
+
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4 mb-6">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+        <h2 className="text-sm font-medium text-[var(--text-muted)]">Watchlist Signals</h2>
+        <button
+          onClick={onRefreshAll}
+          disabled={refreshing}
+          className="px-3 py-1 rounded text-xs font-medium bg-[var(--bg-hover)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)] disabled:opacity-50 disabled:cursor-wait"
+        >
+          {refreshing
+            ? `Refreshing… ${refreshStatus!.completed}/${refreshStatus!.total}${
+                refreshStatus!.current_ticker ? ` (${refreshStatus!.current_ticker})` : ""
+              }`
+            : "Refresh All"}
+        </button>
+      </div>
+
+      <div className="flex flex-wrap gap-1 mb-3">
+        {(
+          [
+            ["all", "All"],
+            ["BUY", "BUY"],
+            ["SELL", "SELL"],
+            ["HOLD", "HOLD"],
+            ["none", "No Signal"],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => setFilter(key)}
+            className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+              filter === key
+                ? "bg-[var(--blue)] text-white"
+                : "bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-[var(--text)]"
+            }`}
+          >
+            {label} ({counts[key]})
+          </button>
+        ))}
+      </div>
+
+      <div className="flex items-center gap-3 px-3 py-1.5 text-xs font-medium text-[var(--text-muted)] border-b border-[var(--border)]">
+        <SortHeader label="Ticker" sortKey="ticker" activeKey={sortKey} dir={sortDir} onClick={handleSort} className="w-16" />
+        <SortHeader label="Price" sortKey="price" activeKey={sortKey} dir={sortDir} onClick={handleSort} className="w-20" />
+        <SortHeader label="Confidence" sortKey="confidence" activeKey={sortKey} dir={sortDir} onClick={handleSort} className="flex-1" />
+      </div>
+
+      <div className="max-h-72 overflow-y-auto rounded-lg border border-t-0 border-[var(--border)] divide-y divide-[var(--border)]">
+        {sorted.length === 0 ? (
+          <p className="p-4 text-sm text-[var(--text-muted)] text-center">No tickers in this category.</p>
+        ) : (
+          sorted.map((s) => (
+            <div
+              key={s.ticker}
+              className={`flex items-center gap-3 px-3 py-2 text-sm transition-colors ${
+                s.ticker === activeTicker ? "bg-[var(--blue)]/10" : "hover:bg-[var(--bg-hover)]"
+              }`}
+            >
+              <button
+                onClick={() => onSelect(s.ticker)}
+                className={`font-semibold w-16 text-left ${
+                  s.ticker === activeTicker ? "text-[var(--blue)]" : "text-[var(--text)]"
+                }`}
+              >
+                {s.ticker}
+              </button>
+              <span className="w-20 font-mono text-[var(--text-muted)]">
+                {s.price != null ? `$${s.price.toFixed(2)}` : "—"}
+              </span>
+              <span className="flex-1 flex items-center gap-2">
+                {s.signal ? (
+                  <>
+                    <ActionBadge action={s.signal.action} />
+                    <span className="text-xs text-[var(--text-muted)]">{s.signal.confidence}%</span>
+                  </>
+                ) : (
+                  <span className="text-xs text-[var(--text-muted)]">Not analyzed yet</span>
+                )}
+              </span>
+              {summary.length > 1 && (
+                <button
+                  onClick={() => onRemove(s.ticker)}
+                  aria-label={`Remove ${s.ticker}`}
+                  className="w-5 h-5 flex items-center justify-center rounded-full text-xs leading-none text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)]"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 type ChartInterval = "daily" | "minute";
+type ChartType = "area" | "candlestick";
 
 interface RangeOption {
   label: string;
@@ -489,6 +765,7 @@ function toUnixSeconds(iso: string): UTCTimestamp {
 
 function PriceChartPanel({ ticker }: { ticker: string }) {
   const [interval, setInterval_] = useState<ChartInterval>("daily");
+  const [chartType, setChartType] = useState<ChartType>("area");
   const [days, setDays] = useState(365);
   const [bars, setBars] = useState<OHLCVBar[]>([]);
   const [loading, setLoading] = useState(false);
@@ -500,6 +777,7 @@ function PriceChartPanel({ ticker }: { ticker: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const areaSeriesRef = useRef<ISeriesApi<"Area"> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const barsRef = useRef<OHLCVBar[]>([]);
 
@@ -546,72 +824,85 @@ function PriceChartPanel({ ticker }: { ticker: string }) {
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: "#1a1a2e" },
       timeScale: { borderColor: "#1a1a2e" },
-    });
-
-    const candleSeries = chart.addCandlestickSeries({
-      upColor: "#22c55e",
-      downColor: "#ef4444",
-      borderUpColor: "#22c55e",
-      borderDownColor: "#ef4444",
-      wickUpColor: "#22c55e",
-      wickDownColor: "#ef4444",
+      // Robinhood-style: a one-finger drag scrubs the crosshair instead of
+      // panning the chart (pinch-to-zoom is unaffected — that's handleScale,
+      // not handleScroll).
+      handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: false, vertTouchDrag: false },
     });
 
     // Overlay histogram on its own (invisible) price scale so it shares
-    // the chart without competing with the candlestick price axis.
+    // the chart without competing with the price series' own axis.
     const volumeSeries = chart.addHistogramSeries({
       priceFormat: { type: "volume" },
       priceScaleId: "",
     });
     volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
 
+    // Series-type-agnostic: look the hovered bar up from our own data by
+    // timestamp rather than reading it back out of the series (whose shape
+    // differs between candlestick and area), so this doesn't need to know
+    // which price series is currently active.
     chart.subscribeCrosshairMove((param) => {
-      const candle = param.seriesData.get(candleSeries) as
-        | { time: UTCTimestamp; open: number; high: number; low: number; close: number }
-        | undefined;
-      if (!param.time || !candle) {
-        // Cursor left the chart — fall back to showing the latest bar.
-        const latest = barsRef.current;
+      const latest = barsRef.current;
+      if (!param.time) {
         setHover(latest.length > 0 ? latest[latest.length - 1] : null);
         return;
       }
-      const vol = param.seriesData.get(volumeSeries) as { value: number } | undefined;
-      setHover({
-        timestamp: new Date((candle.time as number) * 1000).toISOString(),
-        open: candle.open,
-        high: candle.high,
-        low: candle.low,
-        close: candle.close,
-        volume: vol?.value ?? 0,
-      });
+      const match = latest.find((b) => toUnixSeconds(b.timestamp) === param.time);
+      setHover(match ?? (latest.length > 0 ? latest[latest.length - 1] : null));
     });
 
     chartRef.current = chart;
-    candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
 
     return () => {
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
+      areaSeriesRef.current = null;
       volumeSeriesRef.current = null;
     };
   }, []);
 
-  // Push fresh data into the chart whenever bars/interval change
+  // Create/replace the price series whenever the chart type toggles —
+  // candlestick and area series have incompatible data shapes, so this
+  // can't just be a restyle of one persistent series.
+  useEffect(() => {
+    if (!chartRef.current) return;
+
+    let series: ISeriesApi<"Area"> | ISeriesApi<"Candlestick">;
+    if (chartType === "area") {
+      series = chartRef.current.addAreaSeries({
+        lineColor: "#22c55e",
+        topColor: "rgba(34,197,94,0.28)",
+        bottomColor: "rgba(34,197,94,0)",
+        lineWidth: 2,
+      });
+      areaSeriesRef.current = series;
+      candleSeriesRef.current = null;
+    } else {
+      series = chartRef.current.addCandlestickSeries({
+        upColor: "#22c55e",
+        downColor: "#ef4444",
+        borderUpColor: "#22c55e",
+        borderDownColor: "#ef4444",
+        wickUpColor: "#22c55e",
+        wickDownColor: "#ef4444",
+      });
+      candleSeriesRef.current = series;
+      areaSeriesRef.current = null;
+    }
+
+    return () => {
+      chartRef.current?.removeSeries(series);
+    };
+  }, [chartType]);
+
+  // Push fresh data into the chart whenever bars/interval/chartType change
   useEffect(() => {
     barsRef.current = bars;
-    if (!candleSeriesRef.current || !volumeSeriesRef.current || !chartRef.current) return;
+    if (!volumeSeriesRef.current || !chartRef.current) return;
 
-    candleSeriesRef.current.setData(
-      bars.map((b) => ({
-        time: toUnixSeconds(b.timestamp),
-        open: b.open,
-        high: b.high,
-        low: b.low,
-        close: b.close,
-      }))
-    );
     volumeSeriesRef.current.setData(
       bars.map((b) => ({
         time: toUnixSeconds(b.timestamp),
@@ -619,13 +910,38 @@ function PriceChartPanel({ ticker }: { ticker: string }) {
         color: b.close >= b.open ? "rgba(34,197,94,0.4)" : "rgba(239,68,68,0.4)",
       }))
     );
+
+    if (chartType === "candlestick" && candleSeriesRef.current) {
+      candleSeriesRef.current.setData(
+        bars.map((b) => ({
+          time: toUnixSeconds(b.timestamp),
+          open: b.open,
+          high: b.high,
+          low: b.low,
+          close: b.close,
+        }))
+      );
+    } else if (chartType === "area" && areaSeriesRef.current) {
+      // Robinhood colors the whole line/fill by whether price is up or
+      // down over the currently-loaded range, not per-bar.
+      const up = bars.length === 0 || bars[bars.length - 1].close >= bars[0].open;
+      areaSeriesRef.current.applyOptions({
+        lineColor: up ? "#22c55e" : "#ef4444",
+        topColor: up ? "rgba(34,197,94,0.28)" : "rgba(239,68,68,0.28)",
+        bottomColor: up ? "rgba(34,197,94,0)" : "rgba(239,68,68,0)",
+      });
+      areaSeriesRef.current.setData(
+        bars.map((b) => ({ time: toUnixSeconds(b.timestamp), value: b.close }))
+      );
+    }
+
     chartRef.current.applyOptions({
       timeScale: { timeVisible: interval === "minute", secondsVisible: false },
     });
     chartRef.current.timeScale().fitContent();
 
     setHover(bars.length > 0 ? bars[bars.length - 1] : null);
-  }, [bars, interval]);
+  }, [bars, interval, chartType]);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -649,14 +965,38 @@ function PriceChartPanel({ ticker }: { ticker: string }) {
     }
   };
 
+  // Per-bar change (this bar's own move), used in the detailed OHLC row.
   const change = hover ? hover.close - hover.open : 0;
   const changePct = hover && hover.open ? (change / hover.open) * 100 : 0;
 
+  // Change since the start of the currently-loaded range, used for the
+  // big Robinhood-style header price (updates live as the crosshair moves).
+  const periodOpen = bars.length > 0 ? bars[0].open : null;
+  const periodChange = hover && periodOpen != null ? hover.close - periodOpen : 0;
+  const periodChangePct = periodOpen ? (periodChange / periodOpen) * 100 : 0;
+
   return (
     <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4">
-      {/* Header row: title + filters */}
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-        <h2 className="text-sm font-medium text-[var(--text-muted)]">Price Chart</h2>
+      {/* Header row: big price + filters */}
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+        <div>
+          <h2 className="text-xs font-medium text-[var(--text-muted)] mb-1">{ticker} · Price Chart</h2>
+          {hover && (
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <span className="text-3xl font-semibold text-[var(--text)] tabular-nums">
+                ${hover.close.toFixed(2)}
+              </span>
+              <span
+                className={`text-sm font-medium tabular-nums ${
+                  periodChange >= 0 ? "text-[var(--green)]" : "text-[var(--red)]"
+                }`}
+              >
+                {periodChange >= 0 ? "+" : ""}
+                {periodChange.toFixed(2)} ({periodChangePct.toFixed(2)}%)
+              </span>
+            </div>
+          )}
+        </div>
 
         <div className="flex flex-wrap items-center gap-2">
           {/* Interval toggle */}
@@ -672,6 +1012,23 @@ function PriceChartPanel({ ticker }: { ticker: string }) {
                 }`}
               >
                 {iv === "daily" ? "Daily" : "1-Minute"}
+              </button>
+            ))}
+          </div>
+
+          {/* Chart type toggle */}
+          <div className="flex rounded-lg border border-[var(--border)] overflow-hidden">
+            {(["area", "candlestick"] as const).map((ct) => (
+              <button
+                key={ct}
+                onClick={() => setChartType(ct)}
+                className={`px-3 py-1 text-xs font-medium transition-colors ${
+                  chartType === ct
+                    ? "bg-[var(--blue)] text-white"
+                    : "bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-[var(--text)]"
+                }`}
+              >
+                {ct === "area" ? "Line" : "Candles"}
               </button>
             ))}
           </div>
@@ -776,6 +1133,99 @@ function PriceChartPanel({ ticker }: { ticker: string }) {
           Volume
         </span>
       </div>
+    </div>
+  );
+}
+
+interface ForecastResult {
+  ticker: string;
+  direction: "up" | "down";
+  probability_up: number;
+  confidence: number;
+  conviction: "low" | "moderate" | "high";
+  horizon_minutes: number;
+  as_of: string;
+}
+
+// A separate, much-shorter-horizon call from the BUY/SELL/HOLD signal
+// above (5 minutes vs. 2-4 weeks) — a pattern-based probability lean
+// from recent minute bars, not a prediction. Fails soft: most tickers
+// won't have minute data or a trained model yet, and that's an expected,
+// quiet state here, not an error banner.
+function ForecastPanel({ ticker }: { ticker: string }) {
+  const [forecast, setForecast] = useState<ForecastResult | null>(null);
+  const [status, setStatus] = useState<"loading" | "ok" | "unavailable">("loading");
+
+  useEffect(() => {
+    setStatus("loading");
+    setForecast(null);
+    fetch(`${API}/api/forecast/${ticker}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d) {
+          setForecast(d);
+          setStatus("ok");
+        } else {
+          setStatus("unavailable");
+        }
+      })
+      .catch(() => setStatus("unavailable"));
+  }, [ticker]);
+
+  if (status === "loading") return null;
+
+  if (status === "unavailable" || !forecast) {
+    return (
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-5 text-sm text-[var(--text-muted)]">
+        <h2 className="text-sm font-medium text-[var(--text-muted)] mb-1">Next 5 Minutes</h2>
+        Forecast unavailable for {ticker} — needs synced minute data and a trained model.
+      </div>
+    );
+  }
+
+  const up = forecast.direction === "up";
+  // Backtesting found accuracy is ~50% (a coin flip) on the model's
+  // low-conviction calls but ~56% on its top-1% most confident ones, so
+  // a low-conviction reading is deliberately greyed out rather than
+  // shown in signal colors — presenting it as a real call would be
+  // misleading.
+  const lowConviction = forecast.conviction === "low";
+  const directionColor = lowConviction
+    ? "text-[var(--text-muted)]"
+    : up
+    ? "text-[var(--green)]"
+    : "text-[var(--red)]";
+  const convictionStyles: Record<string, string> = {
+    high: "bg-[var(--blue)] text-white",
+    moderate: "bg-[var(--bg-hover)] text-[var(--text)] border border-[var(--border)]",
+    low: "bg-[var(--bg-hover)] text-[var(--text-muted)] border border-[var(--border)]",
+  };
+
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-5">
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-sm font-medium text-[var(--text-muted)]">Next 5 Minutes</h2>
+        <span
+          className={`text-[10px] uppercase tracking-wide font-semibold px-2 py-0.5 rounded-full ${
+            convictionStyles[forecast.conviction] || convictionStyles.low
+          }`}
+        >
+          {forecast.conviction} conviction
+        </span>
+      </div>
+      <div className="flex items-center gap-2 mb-1">
+        <span className={`text-2xl font-bold ${directionColor}`}>{up ? "▲ UP" : "▼ DOWN"}</span>
+        <span className="text-sm text-[var(--text-muted)]">{forecast.confidence}% confidence</span>
+      </div>
+      <p className="text-xs text-[var(--text-muted)]">
+        P(up) {(forecast.probability_up * 100).toFixed(1)}% — pattern-based estimate, not financial advice
+      </p>
+      {lowConviction && (
+        <p className="text-xs text-[var(--text-muted)] mt-2 pt-2 border-t border-[var(--border)]">
+          This one is close to a coin flip — the model is only meaningfully better than
+          chance on its high-conviction calls.
+        </p>
+      )}
     </div>
   );
 }

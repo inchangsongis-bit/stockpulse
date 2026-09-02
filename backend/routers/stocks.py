@@ -5,10 +5,11 @@ from datetime import datetime, timedelta
 from typing import Optional
 from database import get_db
 from models import OHLCV, NewsArticle
-from data_sources.polygon import fetch_ohlcv, PolygonError
+from data_sources.polygon import PolygonError
 from data_sources.finnhub import fetch_company_news, FinnhubError
 from analysis.finbert_sentiment import score_text
 from analysis.news_heuristics import source_credibility, impact_from_relevance
+from services.ohlcv_sync import sync_ticker_ohlcv, SyncValidationError
 
 router = APIRouter(prefix="/api/stocks", tags=["stocks"])
 
@@ -51,15 +52,6 @@ async def get_ohlcv(
     }
 
 
-# Minute-level history gets large fast (Polygon caps a single request at
-# 50,000 bars — a few weeks of 1-min SPY bars), so it gets a much smaller
-# default/max window than daily bars.
-_SYNC_LIMITS = {
-    "daily": {"default_days": 730, "max_days": 1825},
-    "minute": {"default_days": 5, "max_days": 30},
-}
-
-
 @router.post("/{ticker}/sync")
 async def sync_ohlcv(
     ticker: str,
@@ -67,39 +59,23 @@ async def sync_ohlcv(
     days: Optional[int] = Query(default=None, ge=1),
     db: AsyncSession = Depends(get_db),
 ):
-    """Replace stored OHLCV history for a ticker with real data from Polygon."""
-    ticker = ticker.upper()
-    limits = _SYNC_LIMITS[interval]
-    days = days if days is not None else limits["default_days"]
-    if days > limits["max_days"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"days must be <= {limits['max_days']} for interval={interval}",
-        )
+    """
+    Sync OHLCV history for a ticker from Polygon.
 
+    First sync for a ticker+interval fetches and stores the full `days`
+    window (or the default). Every sync after that is incremental: it
+    fetches only from the last stored bar forward (plus a small overlap
+    to catch corrections to recent bars) and replaces just that
+    overlapping tail — `days` is ignored once a ticker has history, so
+    syncing while viewing a short range pill (e.g. "1M") can no longer
+    wipe out years of previously-synced data.
+    """
     try:
-        bars = await fetch_ohlcv(ticker, interval=interval, days=days)
+        return await sync_ticker_ohlcv(ticker, interval, days, db)
+    except SyncValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except PolygonError as e:
         raise HTTPException(status_code=502, detail=str(e))
-
-    if not bars:
-        raise HTTPException(status_code=502, detail=f"Polygon returned no data for {ticker}")
-
-    await db.execute(delete(OHLCV).where(OHLCV.ticker == ticker, OHLCV.interval == interval))
-    for bar in bars:
-        db.add(OHLCV(**bar))
-    await db.commit()
-
-    return {
-        "ticker": ticker,
-        "interval": interval,
-        "synced_bars": len(bars),
-        "range": {
-            "start": bars[0]["timestamp"].isoformat(),
-            "end": bars[-1]["timestamp"].isoformat(),
-        },
-        "latest_close": bars[-1]["close"],
-    }
 
 
 @router.post("/{ticker}/news/sync")
