@@ -27,9 +27,31 @@ METADATA_PATH = MODEL_PATH.with_suffix(".json")
 # vote.
 SENTIMENT_WEIGHT = 0.05
 
+# US regular trading hours as minute-of-day in the machine's local
+# timezone — the same frame the stored bar timestamps use, since
+# data_sources/polygon.py converts with datetime.fromtimestamp().
+RTH_START_MIN, RTH_END_MIN = 390, 780
+EDGE_WINDOW_MINUTES = 30
+
+# Error analysis over 2 years / 13.2M bars (scripts/research_forecast_v8.py)
+# found the model is at its worst in the opening and closing half-hours:
+# 50.6% accuracy there versus 51.8% through the middle of the session,
+# while those windows carry the LARGEST moves (26.5bps average vs 14.3)
+# and 22.5% of all high-conviction calls. That combination — biggest
+# exposure exactly where the model is least skilled — is worth declining
+# rather than acting on, so conviction is capped during those windows.
+
 
 class ForecastUnavailable(Exception):
     pass
+
+
+def _in_session_edge_window(ts) -> bool:
+    minute_of_day = ts.hour * 60 + ts.minute
+    return (
+        RTH_START_MIN <= minute_of_day < RTH_START_MIN + EDGE_WINDOW_MINUTES
+        or RTH_END_MIN - EDGE_WINDOW_MINUTES < minute_of_day <= RTH_END_MIN
+    )
 
 
 @lru_cache
@@ -100,11 +122,20 @@ def predict_direction(minute_bars: pd.DataFrame, sentiment: Optional[float] = 0.
     else:
         conviction = "low"
 
+    # See _in_session_edge_window: the model is measurably least accurate
+    # in the first and last half-hour, on the largest moves. Cap rather
+    # than zero it out, so the call is still shown — just never dressed up
+    # as high conviction.
+    session_edge = _in_session_edge_window(featured.iloc[-1]["timestamp"])
+    if session_edge and conviction == "high":
+        conviction = "moderate"
+
     return {
         "direction": direction,
         "probability_up": round(adjusted, 3),
         "model_probability_up": round(proba_up, 3),
         "confidence": confidence,
         "conviction": conviction,
+        "session_edge_window": session_edge,
         "horizon_minutes": 5,
     }

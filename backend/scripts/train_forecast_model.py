@@ -36,7 +36,6 @@ UI/email output should always present it that way.
 import asyncio
 import json
 import sys
-from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -56,26 +55,25 @@ from models import OHLCV  # noqa: E402
 
 
 async def load_minute_bars_by_ticker() -> dict:
+    """
+    Selects raw columns rather than ORM entities and builds one DataFrame
+    up front. The history now runs to ~13M minute bars; instantiating that
+    many ORM objects and an intermediate dict-of-lists costs several GB of
+    RAM, where this costs a few hundred MB.
+    """
     async with async_session() as db:
         result = await db.execute(
-            select(OHLCV)
+            select(OHLCV.ticker, OHLCV.timestamp, OHLCV.open, OHLCV.high,
+                   OHLCV.low, OHLCV.close, OHLCV.volume)
             .where(OHLCV.interval == "minute")
             .order_by(OHLCV.ticker, OHLCV.timestamp.asc())
         )
-        rows = result.scalars().all()
+        df = pd.DataFrame(
+            result.all(),
+            columns=["ticker", "timestamp", "open", "high", "low", "close", "volume"],
+        )
 
-    bars_by_ticker = defaultdict(list)
-    for r in rows:
-        bars_by_ticker[r.ticker].append({
-            "timestamp": r.timestamp,
-            "open": r.open,
-            "high": r.high,
-            "low": r.low,
-            "close": r.close,
-            "volume": r.volume,
-        })
-
-    return {t: pd.DataFrame(bars) for t, bars in bars_by_ticker.items()}
+    return {t: g.reset_index(drop=True) for t, g in df.groupby("ticker", sort=False)}
 
 
 def main():

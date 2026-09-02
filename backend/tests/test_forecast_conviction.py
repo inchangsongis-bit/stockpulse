@@ -91,3 +91,47 @@ def test_sentiment_nudge_can_change_conviction_tier(monkeypatch, tmp_path):
     assert plain["conviction"] == "moderate"
     assert nudged["conviction"] == "high"
     assert nudged["model_probability_up"] == 0.54  # raw model output unchanged
+
+
+def _bars_ending_at(hour, minute, n=30):
+    end = pd.Timestamp(2026, 1, 2, hour, minute)
+    idx = pd.date_range(end=end, periods=n, freq="min")
+    return pd.DataFrame({
+        "timestamp": idx,
+        "open": [100 + i * 0.01 for i in range(n)],
+        "high": [100 + i * 0.01 + 0.02 for i in range(n)],
+        "low": [100 + i * 0.01 - 0.02 for i in range(n)],
+        "close": [100 + i * 0.01 for i in range(n)],
+        "volume": [100_000] * n,
+    })
+
+
+@pytest.mark.parametrize(
+    "hour,minute,expected_edge",
+    [
+        (6, 45, True),    # first half-hour after the 06:30 open
+        (12, 50, True),   # last half-hour before the 13:00 close
+        (10, 0, False),   # mid-session
+        (8, 15, False),   # mid-session
+    ],
+)
+def test_session_edge_window_detection(monkeypatch, tmp_path, hour, minute, expected_edge):
+    _mock_model(monkeypatch, 0.60)  # strong enough to be "high" on its own
+    _mock_cuts(monkeypatch, tmp_path, moderate=0.028, high=0.052)
+
+    result = forecast.predict_direction(_bars_ending_at(hour, minute), sentiment=0.0)
+
+    assert result["session_edge_window"] is expected_edge
+    # High conviction is capped to moderate inside the open/close windows,
+    # where the model measurably underperforms on the largest moves.
+    assert result["conviction"] == ("moderate" if expected_edge else "high")
+
+
+def test_session_edge_window_does_not_upgrade_low_conviction(monkeypatch, tmp_path):
+    _mock_model(monkeypatch, 0.505)  # edge 0.005 -> "low"
+    _mock_cuts(monkeypatch, tmp_path, moderate=0.028, high=0.052)
+
+    result = forecast.predict_direction(_bars_ending_at(6, 45), sentiment=0.0)
+
+    assert result["session_edge_window"] is True
+    assert result["conviction"] == "low"  # capping must never raise a tier
