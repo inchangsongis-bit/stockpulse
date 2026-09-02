@@ -40,10 +40,28 @@ EDGE_WINDOW_MINUTES = 30
 # and 22.5% of all high-conviction calls. That combination — biggest
 # exposure exactly where the model is least skilled — is worth declining
 # rather than acting on, so conviction is capped during those windows.
+#
+# Outside regular hours the problem is more fundamental. Splitting the
+# risk-coverage curve by session (scripts/research_high_conviction.py)
+# showed the model's entire apparent edge lives in extended-hours bars:
+# at the top 0.1% of confidence it scores 61.6% across all hours but only
+# 52.9% within regular hours. The gate that best predicted its successes
+# selects bars with a median of ~1,200 shares against ~24,000 normal, and
+# 99.9% of those fall outside regular hours. That is bid-ask bounce in
+# illiquid conditions — statistically real, consistent with the ~9x
+# stronger negative autocorrelation measured in extended hours, and not
+# something anyone could execute against. Conviction is therefore floored
+# to "low" outside regular hours rather than advertising an edge that
+# only exists where the tape is too thin to trade.
 
 
 class ForecastUnavailable(Exception):
     pass
+
+
+def _session_of(ts) -> str:
+    minute_of_day = ts.hour * 60 + ts.minute
+    return "regular" if RTH_START_MIN <= minute_of_day <= RTH_END_MIN else "extended"
 
 
 def _in_session_edge_window(ts) -> bool:
@@ -122,12 +140,15 @@ def predict_direction(minute_bars: pd.DataFrame, sentiment: Optional[float] = 0.
     else:
         conviction = "low"
 
-    # See _in_session_edge_window: the model is measurably least accurate
-    # in the first and last half-hour, on the largest moves. Cap rather
-    # than zero it out, so the call is still shown — just never dressed up
-    # as high conviction.
-    session_edge = _in_session_edge_window(featured.iloc[-1]["timestamp"])
-    if session_edge and conviction == "high":
+    latest_ts = featured.iloc[-1]["timestamp"]
+    session = _session_of(latest_ts)
+    session_edge = _in_session_edge_window(latest_ts)
+
+    if session == "extended":
+        # The apparent edge outside regular hours is illiquidity artifact,
+        # not skill — see the module comment above.
+        conviction = "low"
+    elif session_edge and conviction == "high":
         conviction = "moderate"
 
     return {
@@ -136,6 +157,7 @@ def predict_direction(minute_bars: pd.DataFrame, sentiment: Optional[float] = 0.
         "model_probability_up": round(proba_up, 3),
         "confidence": confidence,
         "conviction": conviction,
+        "market_session": session,
         "session_edge_window": session_edge,
         "horizon_minutes": 5,
     }

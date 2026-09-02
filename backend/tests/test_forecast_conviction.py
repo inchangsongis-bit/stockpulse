@@ -135,3 +135,28 @@ def test_session_edge_window_does_not_upgrade_low_conviction(monkeypatch, tmp_pa
 
     assert result["session_edge_window"] is True
     assert result["conviction"] == "low"  # capping must never raise a tier
+
+
+@pytest.mark.parametrize(
+    "hour,minute,expected_session,expected_conviction",
+    [
+        (10, 0, "regular", "high"),       # mid-session: full tiering
+        (6, 45, "regular", "moderate"),   # opening half-hour: capped
+        (12, 50, "regular", "moderate"),  # closing half-hour: capped
+        (15, 0, "extended", "low"),       # after the close: floored
+        (5, 0, "extended", "low"),        # pre-market: floored
+    ],
+)
+def test_conviction_is_floored_outside_regular_hours(
+    monkeypatch, tmp_path, hour, minute, expected_session, expected_conviction
+):
+    _mock_model(monkeypatch, 0.60)  # would be "high" on the raw score alone
+    _mock_cuts(monkeypatch, tmp_path, moderate=0.028, high=0.052)
+
+    result = forecast.predict_direction(_bars_ending_at(hour, minute), sentiment=0.0)
+
+    assert result["market_session"] == expected_session
+    # Extended-hours accuracy is bid-ask-bounce artifact (61.6% all-hours
+    # vs 52.9% regular-hours at the top 0.1% of confidence), so conviction
+    # must never advertise an edge there.
+    assert result["conviction"] == expected_conviction
