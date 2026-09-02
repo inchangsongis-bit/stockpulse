@@ -1,10 +1,16 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, BigInteger
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, BigInteger, Index
 from sqlalchemy.sql import func
 from database import Base
 
 
 class OHLCV(Base):
     __tablename__ = "ohlcv"
+
+    # "Latest bar per ticker" is the hot query behind the watchlist
+    # summary. The single-column indexes leave SQLite sorting each
+    # ticker's rows for it, which is fine at thousands of rows and very
+    # much not at the 13M+ this table now holds.
+    __table_args__ = (Index("ix_ohlcv_ticker_timestamp", "ticker", "timestamp"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     ticker = Column(String(10), nullable=False, index=True)
