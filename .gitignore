@@ -31,3 +31,6 @@ yarn-error.log*
 # Trained ML model artifacts (regenerate via scripts/train_forecast_model.py)
 backend/ml/*.joblib
 backend/ml/*.json
+
+# Options research pilot dataset (regenerate via scripts/fetch_options_pilot.py)
+backend/options_pilot.db
