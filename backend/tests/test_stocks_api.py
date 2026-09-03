@@ -82,3 +82,38 @@ async def test_latest_with_no_data_returns_error(client):
     resp = await client.get("/api/stocks/NOPE/latest")
     assert resp.status_code == 200
     assert resp.json() == {"error": "No data found"}
+
+
+@pytest.mark.asyncio
+async def test_ohlcv_caps_rows_and_keeps_the_most_recent(client, session_factory):
+    from routers.stocks import MAX_OHLCV_ROWS
+    # One more bar than the cap allows.
+    n = MAX_OHLCV_ROWS + 50
+    async with session_factory() as session:
+        base = datetime.now() - timedelta(minutes=n)
+        for i in range(n):
+            session.add(OHLCV(
+                ticker="SPY", interval="minute",
+                timestamp=base + timedelta(minutes=i),
+                open=100.0, high=100.0, low=100.0, close=float(i), volume=1,
+            ))
+        await session.commit()
+
+    resp = await client.get("/api/stocks/SPY/ohlcv?days=1100&interval=minute")
+    body = resp.json()
+
+    assert body["count"] == MAX_OHLCV_ROWS
+    assert body["truncated"] is True
+    # An uncapped 1100-day minute window is ~428k rows / 52MB; the cap must
+    # keep the NEWEST bars, and still hand them back oldest-first.
+    closes = [d["close"] for d in body["data"]]
+    assert closes[-1] == float(n - 1)
+    assert closes == sorted(closes)
+
+
+@pytest.mark.asyncio
+async def test_ohlcv_not_truncated_under_the_cap(client, session_factory):
+    await seed_bars(session_factory, ticker="SPY", n=5)
+    body = (await client.get("/api/stocks/SPY/ohlcv?days=30")).json()
+    assert body["count"] == 5
+    assert body["truncated"] is False

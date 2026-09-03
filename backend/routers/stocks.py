@@ -14,6 +14,14 @@ from services.ohlcv_sync import sync_ticker_ohlcv, SyncValidationError
 router = APIRouter(prefix="/api/stocks", tags=["stocks"])
 
 
+# A `days` window alone does not bound the response: 1100 days of minute
+# bars is ~428k rows and a 52MB JSON payload, which took 7.3s to serve
+# once the backfill filled the table. Cap the row count too, and take the
+# MOST RECENT bars when the cap bites — anything asking for more than
+# this wants the latest data, not the oldest.
+MAX_OHLCV_ROWS = 20000
+
+
 @router.get("/{ticker}/ohlcv")
 async def get_ohlcv(
     ticker: str,
@@ -30,13 +38,17 @@ async def get_ohlcv(
             OHLCV.interval == interval,
             OHLCV.timestamp >= since,
         )
-        .order_by(OHLCV.timestamp.asc())
+        .order_by(desc(OHLCV.timestamp))
+        .limit(MAX_OHLCV_ROWS)
     )
-    rows = result.scalars().all()
+    # Selected newest-first so the cap keeps recent bars; returned
+    # oldest-first, which is what the charts and indicators expect.
+    rows = list(reversed(result.scalars().all()))
     return {
         "ticker": ticker.upper(),
         "interval": interval,
         "count": len(rows),
+        "truncated": len(rows) == MAX_OHLCV_ROWS,
         "data": [
             {
                 "timestamp": r.timestamp.isoformat(),

@@ -34,3 +34,6 @@ backend/ml/*.json
 
 # Options research pilot dataset (regenerate via scripts/fetch_options_pilot.py)
 backend/options_pilot.db
+
+# graphify knowledge-graph outputs (regenerate with /graphify)
+graphify-out/
