@@ -16,17 +16,30 @@ async def get_summary_rows(db: AsyncSession) -> list:
     if not tickers:
         return []
 
-    # Latest price per ticker, any interval — most recent bar wins. Rows
-    # come back ordered per-ticker by recency, so the first one seen per
-    # ticker is its latest.
-    price_result = await db.execute(
-        select(OHLCV.ticker, OHLCV.close, OHLCV.timestamp)
-        .where(OHLCV.ticker.in_(tickers))
-        .order_by(OHLCV.ticker, desc(OHLCV.timestamp))
-    )
+    # Latest price per ticker, any interval — most recent bar wins.
+    #
+    # One indexed lookup per ticker rather than a single clever query.
+    # The obvious approaches are both far slower here: streaming every
+    # bar back and taking the first per ticker in Python made this a
+    # 34-second endpoint once the minute-bar backfill pushed ohlcv past
+    # 13M rows, and a ROW_NUMBER() window function still made SQLite sort
+    # each ticker's rows from scratch, because its planner won't use the
+    # (ticker, timestamp) index to satisfy a window ORDER BY.
+    #
+    # A plain per-ticker "ORDER BY timestamp DESC LIMIT 1" does use that
+    # index — 51 of them measure at ~3ms in total, against 5.3s for the
+    # window-function version.
     latest_price: dict = {}
-    for ticker, close, _ts in price_result.all():
-        latest_price.setdefault(ticker, close)
+    for ticker in tickers:
+        row = await db.execute(
+            select(OHLCV.close)
+            .where(OHLCV.ticker == ticker)
+            .order_by(desc(OHLCV.timestamp))
+            .limit(1)
+        )
+        price = row.scalar_one_or_none()
+        if price is not None:
+            latest_price[ticker] = price
 
     # Latest signal per ticker, same "first seen per ticker wins" approach.
     sig_result = await db.execute(

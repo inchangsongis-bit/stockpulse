@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-StockPulse is a prototype stock analysis app: a FastAPI backend runs a 4-step AI agent pipeline (news → technicals → sentiment → strategy) to produce BUY/SELL/HOLD signals, and a Next.js frontend renders a multi-ticker dashboard with a candlestick chart, signal history, and news.
+StockPulse is a prototype stock analysis app: a FastAPI backend runs a 4-step AI agent pipeline (news → technicals → sentiment → strategy) to produce BUY/SELL/HOLD signals, and a Next.js frontend renders a multi-ticker dashboard with a price chart, signal history, and news.
+
+Three capabilities have since been added on top of that pipeline, each with its own section below: a **5-minute price-direction forecast** from a locally-trained scikit-learn model, a **daily digest email** to subscribers driven by a scheduled job, and a **free local sentiment path** (FinBERT) that avoids per-article Claude cost.
 
 ## Commands
 
@@ -87,6 +89,76 @@ Each external dependency degrades independently based on whether its key is conf
 - `relevance` is always recomputed fresh even for cache hits (it's a function of the *current* fetch's recency window, not a static property of the article) — only `sentiment`/`source_credibility`/`expected_impact`/`reasoning` come from cache.
 
 No Alembic — `database.py`'s `init_db()` runs `Base.metadata.create_all` then a hand-rolled `_add_missing_columns()` that inspects each table and does targeted `ALTER TABLE ... ADD COLUMN` for anything the model has that the on-disk table doesn't. Extend that function's `migrations` list when adding a column to an existing table; `conftest.py`'s test fixtures build tables fresh via `create_all` so tests never need this.
+
+### `services/` — logic shared between HTTP handlers and background jobs
+
+Routers stay thin; anything a scheduled job also needs lives in `services/`
+so it can be called directly instead of over HTTP:
+
+- `pipeline_runner.py` — one ticker through the full pipeline. Both
+  `POST /api/pipeline/run/{ticker}` and the bulk runner call it. **Tests
+  monkeypatching `get_settings` for the pipeline must target
+  `services.pipeline_runner.get_settings`, not `routers.pipeline`.**
+- `bulk_pipeline.py` — every watchlist ticker in sequence, with in-memory
+  progress at `GET /api/pipeline/run-all/status`. A module-level guard
+  stops a manual run and the scheduled run from overlapping.
+- `ohlcv_sync.py` / `watchlist_summary.py` — extracted from
+  `routers/stocks.py` and `routers/watchlist.py` for the same reason.
+- `daily_digest.py`, `email_sender.py`, `email_templates.py` — the digest.
+
+### 5-minute forecast (`analysis/forecast*.py`, `routers/forecast.py`)
+
+Separate from the BUY/SELL/HOLD signal and a different question entirely
+(5 minutes vs. 2-4 weeks). A `HistGradientBoostingClassifier` trained by
+`scripts/train_forecast_model.py` on pooled minute bars; the artifact
+lives in `backend/ml/` and is **gitignored** — regenerate it locally or
+`GET /api/forecast/{ticker}` returns 503.
+
+Read the conviction logic in `analysis/forecast.py` before changing it.
+Measured accuracy is ~51-52% overall, and the apparent edge at high
+confidence lives almost entirely in extended-hours illiquidity (61.6%
+all-hours vs 52.9% regular-hours at the top 0.1%). Conviction is
+therefore **floored to "low" outside regular hours** and capped in the
+opening/closing half-hours. Those guards exist because the numbers say
+so — don't relax them without re-running `scripts/research_*.py`.
+
+### Daily digest + subscribers
+
+`main.py`'s lifespan registers one APScheduler job at **06:25 US/Pacific**
+(DST-aware, 5 minutes before the open) running
+`services/daily_digest.py`: incremental OHLCV sync → pipeline for every
+watchlist ticker → email each active subscriber. Sending goes through
+Resend (`RESEND_API_KEY`); without a verified domain its sandbox sender
+only delivers to the Resend account's own address. Unsubscribe is a
+token in `Subscriber.unsubscribe_token` — there is no auth system, and
+none of the write endpoints are authenticated.
+
+### Sentiment: two paths
+
+`agents/sentiment_analyst.py` scores via Claude (keyword fallback on
+error). `analysis/finbert_sentiment.py` is a **free local alternative**
+(ProsusAI/finbert, lazy-loaded, ~400MB on first use) behind
+`POST /api/stocks/{ticker}/news/score`, which only fills rows where
+`sentiment IS NULL` so it never downgrades a Claude-scored article.
+Shared heuristics live in `analysis/news_heuristics.py`.
+
+### Query cost on a large `ohlcv` table
+
+The table holds ~13M minute bars after `scripts/backfill_minute_history.py`,
+and the graph shows 15 distinct areas read it. Two patterns that were fine
+at ~600k rows are not fine now, and both have bitten already:
+
+- **Never fetch-then-filter in Python.** "Latest bar per ticker" by
+  streaming every row back took 34s. Use a per-ticker `ORDER BY timestamp
+  DESC LIMIT 1` — it hits `ix_ohlcv_ticker_timestamp` and costs ~3ms. A
+  `ROW_NUMBER()` window function does *not* use that index.
+- **Always bound the row count, not just the date window.** `/ohlcv`
+  with `days=1100&interval=minute` returned 428k rows / 52MB before
+  `MAX_OHLCV_ROWS` capped it.
+
+Indexes need the same forward-migration treatment as columns —
+`create_all` won't add one to an existing table. See
+`database.py`'s `_add_missing_indexes`.
 
 ### Frontend (`frontend/src/app/page.tsx`)
 
